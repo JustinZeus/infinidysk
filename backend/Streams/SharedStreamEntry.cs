@@ -29,6 +29,8 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
     private Stream? _upstream;
     private IAsyncDisposable? _ownership;
     private DavItem? _davItem;
+    private SharedContentIdentity _contentIdentity;
+    private readonly SharedContentIdentity? _reservedContentIdentity;
     private SharedStreamEntryState _state;
     private ITimer? _graceTimer;
     private TaskCompletionSource _pumpWakeup =
@@ -49,7 +51,8 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
         TimeProvider? timeProvider = null,
         int? chunkSize = null,
         int? leadBytes = null,
-        ISegmentBufferPool? pool = null)
+        ISegmentBufferPool? pool = null,
+        SharedContentIdentity? contentIdentity = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentOutOfRangeException.ThrowIfNegative(anchor);
@@ -58,6 +61,7 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
         Anchor = anchor;
         FileSize = fileSize;
         EntryId = Guid.NewGuid();
+        _reservedContentIdentity = contentIdentity;
         _ringSize = ringSizeBytes;
         _grace = grace < TimeSpan.Zero ? TimeSpan.Zero : grace;
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -109,13 +113,33 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentNullException.ThrowIfNull(lease.Stream);
         ArgumentNullException.ThrowIfNull(lease.Ownership);
-        lock (_lock)
+        try
         {
-            if (_state != SharedStreamEntryState.Opening)
-                throw new InvalidOperationException($"Cannot bind shared entry in state {_state}.");
-            _upstream = lease.Stream;
-            _ownership = lease.Ownership;
-            _davItem = lease.DavItem;
+            if (_reservedContentIdentity is { } reservedIdentity && lease.ContentIdentity != reservedIdentity)
+                throw new InvalidOperationException("Detached stream content changed before shared binding.");
+            if (lease.ContentIdentity.FileSize != FileSize)
+                throw new InvalidOperationException("Detached stream content size changed before shared binding.");
+            lock (_lock)
+            {
+                if (_state != SharedStreamEntryState.Opening)
+                    throw new InvalidOperationException($"Cannot bind shared entry in state {_state}.");
+                _upstream = lease.Stream;
+                _ownership = lease.Ownership;
+                _davItem = lease.DavItem;
+                _contentIdentity = lease.ContentIdentity;
+            }
+        }
+        catch
+        {
+            try
+            {
+                lease.Stream.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                lease.Ownership.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            throw;
         }
 
         StartPump();
@@ -124,6 +148,11 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
         Log.Debug(
             "Shared stream entry {EntryId} started for {Path} at anchor {Anchor}",
             EntryId, Path, Anchor);
+    }
+
+    internal SharedContentIdentity ContentIdentity
+    {
+        get { lock (_lock) return _reservedContentIdentity ?? _contentIdentity; }
     }
 
     internal void AbandonOpening()
