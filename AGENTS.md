@@ -340,6 +340,7 @@ Use **GitHub Issue Types** for kind — not kind labels:
 | Issue Type | Use for |
 |------------|---------|
 | `Bug` | Unexpected problem or incorrect behavior |
+| `Audit finding` | Potential defect identified through code review or static analysis, not yet confirmed by a real-world occurrence or reproducible failure |
 | `Feature` | New capability or improvement request |
 | `Task` | Concrete work item that is neither a bug nor a feature |
 
@@ -388,6 +389,16 @@ Assign closed issues to a version milestone (`0.7`, `0.8`, `0.9`, …) for the r
 Do **not** recreate `priority:*` or `effort:*` labels. Meta labels are fine: `performance`, `playback`, `cataloged`, `more-info-required`, `next-major`, `library`, and source tags (`upstream-audit`, `elfhosted`, etc.).
 
 Bug and feature issue templates set Issue Type only (no kind labels, no title prefix).
+
+### Reviewing AI- or audit-filed issues
+
+When reviewing a range of GitHub records for speculative findings:
+
+1. Inspect only records whose GitHub API type is `Issue`; do not reclassify pull requests in the same number range.
+2. Read the issue body and comments. Keep `Bug` when there is evidence of an encountered or reproduced failure, such as user observations, logs, metrics, screenshots, a concrete support case, or a repeatable test result.
+3. Use `Audit finding` when the report is based on source review, static analysis, or a theoretical execution path and provides no evidence that the behavior has occurred or been reproduced.
+4. Treat deterministic tests or a maintainer-confirmed reproduction as evidence for `Bug`, even when the original report began as an audit.
+5. After changing types, read the records back and verify every intended issue changed, every observed report stayed `Bug`, and no pull request was touched.
 
 ## Updating an existing pull request
 
