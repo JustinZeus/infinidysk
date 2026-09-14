@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Contexts;
@@ -16,6 +17,7 @@ namespace NzbWebDAV.Queue;
 
 public sealed class QueueManager : IQueueCoordinator, IDisposable
 {
+    private static readonly TimeSpan SubmissionDrainTimeout = TimeSpan.FromSeconds(4);
     private readonly ConcurrentDictionary<Guid, InProgressQueueItem> _inProgress = new();
     private readonly ConcurrentDictionary<Guid, int> _retryAttempts = new();
 
@@ -49,6 +51,58 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
     private int _pendingAdmissions;
     private bool _admissionPaused;
     private int _disposed;
+
+    private readonly ConcurrentDictionary<Guid, int> _mutationReservations = new();
+    private readonly ConcurrentDictionary<Guid, DateTime> _fallbackDeferrals = new();
+    private readonly ConcurrentDictionary<Guid, long> _claimVersions = new();
+    private long _nextClaimVersion;
+    private readonly ConcurrentDictionary<(string Category, string FileName), int> _submissionKeyReservations = new();
+    private readonly SemaphoreSlim _submissionCommitLock = new(1, 1);
+    private readonly SemaphoreSlim[] _submissionIdLocks =
+    [
+        new(1, 1), new(1, 1), new(1, 1), new(1, 1),
+        new(1, 1), new(1, 1), new(1, 1), new(1, 1),
+    ];
+    private readonly Lock _submissionLifetimeLock = new();
+    private TaskCompletionSource _submissionsCompleted = CompletedTaskSource();
+    private int _activeSubmissions;
+
+    public void SetFallbackDeferral(Guid queueItemId, DateTime deferUntil)
+    {
+        _fallbackDeferrals.AddOrUpdate(queueItemId, deferUntil, (_, existing) => deferUntil > existing ? deferUntil : existing);
+    }
+
+    public void ClearFallbackDeferral(Guid queueItemId)
+    {
+        _fallbackDeferrals.TryRemove(queueItemId, out _);
+    }
+
+    private async Task RegisterClaimDeferralAsync(Guid queueItemId, long claimVersion, DateTime deferUntil)
+    {
+        await LockAsync(() =>
+        {
+            if (_claimVersions.TryGetValue(queueItemId, out var currentVersion) && currentVersion == claimVersion)
+                SetFallbackDeferral(queueItemId, deferUntil);
+        }, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    internal async Task<IDisposable> AcquireSubmissionIdLeaseAsync(Guid id, CancellationToken ct)
+    {
+#pragma warning disable CA2000 // lifetime ownership transfers to the returned reservation, which disposes it after releasing the semaphore
+        var lifetime = EnterSubmission();
+#pragma warning restore CA2000
+        var semaphore = _submissionIdLocks[(id.GetHashCode() & int.MaxValue) % _submissionIdLocks.Length];
+        try
+        {
+            await semaphore.WaitAsync(ct).ConfigureAwait(false);
+            return new SubmissionIdLeaseReservation(semaphore, lifetime);
+        }
+        catch
+        {
+            lifetime.Dispose();
+            throw;
+        }
+    }
 
     private static readonly TimeSpan DefaultStuckItemThreshold =
         EnvironmentUtil.GetLongVariable("QUEUE_ITEM_STUCK_MINUTES") is long minutes and > 0
@@ -249,11 +303,27 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
     private sealed class QueueAdmissionReservation(Action release) : IDisposable
     {
-        private Action? _release = release;
+        private Action? _release = release!;
 
         public void Dispose()
         {
             Interlocked.Exchange(ref _release, null)?.Invoke();
+        }
+    }
+
+    private sealed class SubmissionIdLeaseReservation(
+        SemaphoreSlim semaphore,
+        IDisposable lifetime) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
+            using var leaseLifetime = lifetime;
+            semaphore.Release();
         }
     }
 
@@ -305,55 +375,278 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         }
     }
 
-    /// <summary>
-    /// Cancels in-progress workers and deletes the requested rows. A worker that
-    /// ignores cancellation past <see cref="StuckCancelGracePeriod"/> is
-    /// quarantined: its row, counters, and <see cref="_inProgress"/> entry are
-    /// kept (so no second worker starts for the same id or mount key) and its id
-    /// is returned so callers can surface a failure instead of hanging.
-    /// </summary>
-    /// <returns>Ids whose workers are still running and were not removed.</returns>
-    public async Task<IReadOnlyList<Guid>> RemoveQueueItemsAsync
-    (
+public record QueueRemovalResult(Guid[] RemovedIds, Guid[] StillRunningIds);
+public record QueueSubmissionCommitResult(QueueItem Item, Guid[] RemovedIds);
+
+    private Guid[] ReserveMutationsUnderLock(IEnumerable<Guid> requestedIds)
+    {
+        var ids = requestedIds.Distinct().ToArray();
+        foreach (var id in ids)
+        {
+            _mutationReservations.TryGetValue(id, out var count);
+            _mutationReservations[id] = checked(count + 1);
+        }
+        return ids;
+    }
+
+    private void ReleaseMutationsUnderLock(IEnumerable<Guid> ownedIds)
+    {
+        foreach (var id in ownedIds)
+        {
+            if (_mutationReservations.TryGetValue(id, out var count))
+            {
+                if (count == 1) _mutationReservations.TryRemove(id, out _);
+                else _mutationReservations[id] = count - 1;
+            }
+        }
+    }
+
+    private void ReserveSubmissionKeyUnderLock((string Category, string FileName) key)
+    {
+        _submissionKeyReservations.AddOrUpdate(key, 1, static (_, count) => checked(count + 1));
+    }
+
+    private void ReleaseSubmissionKeyUnderLock((string Category, string FileName) key)
+    {
+        if (_submissionKeyReservations.TryGetValue(key, out var count))
+        {
+            if (count == 1) _submissionKeyReservations.TryRemove(key, out _);
+            else _submissionKeyReservations[key] = count - 1;
+        }
+    }
+
+    private QueueAdmissionReservation EnterSubmission()
+    {
+        lock (_submissionLifetimeLock)
+        {
+            if (_disposed != 0)
+                ObjectDisposedException.ThrowIf(_disposed != 0, this);
+
+            if (_activeSubmissions++ == 0)
+                _submissionsCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        return new QueueAdmissionReservation(() =>
+        {
+            lock (_submissionLifetimeLock)
+            {
+                if (--_activeSubmissions == 0)
+                    _submissionsCompleted.TrySetResult();
+            }
+        });
+    }
+
+    private static TaskCompletionSource CompletedTaskSource()
+    {
+        var source = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        source.SetResult();
+        return source;
+    }
+
+    public async Task<QueueRemovalResult> RemoveQueueItemsDetailedAsync(
         List<Guid> queueItemIds,
         DavDatabaseClient dbClient,
-        CancellationToken ct = default
-    )
+        CancellationToken ct = default)
     {
         List<InProgressQueueItem> toCancel = [];
+        Guid[] reservedIds = [];
         await LockAsync(() =>
         {
+            reservedIds = ReserveMutationsUnderLock(queueItemIds);
             toCancel = _inProgress.Values
-                .Where(x => queueItemIds.Contains(x.QueueItem.Id))
+                .Where(x => reservedIds.Contains(x.QueueItem.Id))
                 .ToList();
         }, ct).ConfigureAwait(false);
 
-        var stillRunning = await CancelAndAwaitWorkersAsync(toCancel, ct).ConfigureAwait(false);
-
-        var removableIds = queueItemIds.Where(id => !stillRunning.Contains(id)).ToList();
-        if (removableIds.Count > 0)
+        try
         {
-            await LockAsync(async () =>
+            var stillRunning = await CancelAndAwaitWorkersAsync(toCancel, ct).ConfigureAwait(false);
+
+            var removableIds = reservedIds.Where(id => !stillRunning.Contains(id)).ToList();
+            List<Guid> removedIds = [];
+            if (removableIds.Count > 0)
             {
-                await dbClient.RemoveQueueItemsAsync(removableIds, ct).ConfigureAwait(false);
-                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-                foreach (var id in removableIds)
+                await LockAsync(async () =>
+                {
+                    await using var transaction = await dbClient.Ctx.Database
+                        .BeginTransactionAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        removedIds = await dbClient.RemoveQueueItemsAsync(removableIds, ct).ConfigureAwait(false);
+                        await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                        await transaction.CommitAsync(ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); }
+                        catch (Exception rollbackException) when (rollbackException is not OutOfMemoryException)
+                        {
+                            Log.Debug(rollbackException, "Failed to roll back queue removal transaction");
+                        }
+                        throw;
+                    }
+                    foreach (var id in removedIds)
+                    {
+                        _retryAttempts.TryRemove(id, out _);
+                        _stallAttempts.TryRemove(id, out _);
+                        _claimVersions.TryRemove(id, out _);
+                        ClearFallbackDeferral(id);
+                    }
+                }, ct).ConfigureAwait(false);
+            }
+
+            if (stillRunning.Count > 0)
+            {
+                Log.Warning(
+                    "Queue items {QueueItemIds} ignored cancellation and were not removed; " +
+                    "their rows stay queued until the workers stop (restart the container to reclaim).",
+                    string.Join(", ", stillRunning));
+            }
+
+            return new QueueRemovalResult(removedIds.ToArray(), stillRunning.ToArray());
+        }
+        finally
+        {
+            await LockAsync(() => ReleaseMutationsUnderLock(reservedIds), CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    public async Task<IReadOnlyList<Guid>> RemoveQueueItemsAsync(
+        List<Guid> queueItemIds,
+        DavDatabaseClient dbClient,
+        CancellationToken ct = default)
+    {
+        var result = await RemoveQueueItemsDetailedAsync(queueItemIds, dbClient, ct).ConfigureAwait(false);
+        return result.StillRunningIds;
+    }
+
+    public async Task<QueueSubmissionCommitResult> CommitSubmissionAsync(
+        QueueItem replacement,
+        NzbName replacementName,
+        bool replaceExisting,
+        DavDatabaseClient dbClient,
+        CancellationToken ct)
+    {
+        using var submissionLifetime = EnterSubmission();
+        var submissionKey = (replacement.Category, replacement.FileName);
+        var commitLockHeld = false;
+        try
+        {
+            Guid? conflictId = null;
+            List<InProgressQueueItem> toCancel = [];
+            Guid[] reservedIds = [];
+
+            await LockAsync(() =>
+            {
+                ReserveSubmissionKeyUnderLock(submissionKey);
+            }, ct).ConfigureAwait(false);
+
+            try
+            {
+                await LockAsync(() =>
+                {
+                    var conflict = dbClient.Ctx.QueueItems.AsNoTracking()
+                        .FirstOrDefault(q => q.Category == replacement.Category && q.FileName == replacement.FileName);
+                    if (conflict is null) return;
+                    if (!replaceExisting)
+                    {
+                        throw new BadHttpRequestException(
+                            $"A queue item named '{replacement.FileName}' already exists in category '{replacement.Category}'.");
+                    }
+
+                    conflictId = conflict.Id;
+                    reservedIds = ReserveMutationsUnderLock([conflict.Id]);
+                    toCancel = _inProgress.Values
+                        .Where(x => x.QueueItem.Id == conflict.Id)
+                        .ToList();
+                }, ct).ConfigureAwait(false);
+
+                if (conflictId is not null)
+                {
+                    var stillRunning = await CancelAndAwaitWorkersAsync(toCancel, ct).ConfigureAwait(false);
+                    if (stillRunning.Count > 0)
+                    {
+                        throw new BadHttpRequestException(
+                            $"The existing queue item '{replacement.FileName}' is still stopping and cannot be replaced yet; try again shortly.");
+                    }
+
+                    await LockAsync(() =>
+                    {
+                        var currentConflict = dbClient.Ctx.QueueItems.AsNoTracking()
+                            .FirstOrDefault(q => q.Category == replacement.Category && q.FileName == replacement.FileName);
+                        if (currentConflict is null)
+                        {
+                            ReleaseMutationsUnderLock(reservedIds);
+                            reservedIds = [];
+                            conflictId = null;
+                            toCancel = [];
+                        }
+                        else if (currentConflict.Id != conflictId.Value)
+                        {
+                            throw new BadHttpRequestException(
+                                $"A queue item named '{replacement.FileName}' already exists in category '{replacement.Category}'.");
+                        }
+                    }, ct).ConfigureAwait(false);
+                }
+
+                await _submissionCommitLock.WaitAsync(ct).ConfigureAwait(false);
+                commitLockHeld = true;
+                await using var transaction = await dbClient.Ctx.Database
+                    .BeginTransactionAsync(ct)
+                    .ConfigureAwait(false);
+
+                List<Guid> removedIds = [];
+                if (conflictId is not null)
+                {
+                    removedIds = await dbClient.RemoveQueueItemsAsync([conflictId.Value], ct).ConfigureAwait(false);
+                }
+
+                dbClient.Ctx.QueueItems.Add(replacement);
+                dbClient.Ctx.NzbNames.Add(replacementName);
+
+                try
+                {
+                    await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                    await transaction.CommitAsync(ct).ConfigureAwait(false);
+                }
+                catch (DbUpdateException ex)
+                {
+                    await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                    dbClient.Ctx.Entry(replacement).State = EntityState.Detached;
+                    dbClient.Ctx.Entry(replacementName).State = EntityState.Detached;
+                    if (NzbSubmissionService.IsCategoryFileNameUniqueViolation(ex))
+                    {
+                        throw new BadHttpRequestException(
+                            $"A queue item named '{replacement.FileName}' already exists in category '{replacement.Category}'.", ex);
+                    }
+                    throw;
+                }
+
+                foreach (var id in removedIds)
                 {
                     _retryAttempts.TryRemove(id, out _);
                     _stallAttempts.TryRemove(id, out _);
+                    _claimVersions.TryRemove(id, out _);
+                    ClearFallbackDeferral(id);
                 }
-            }, ct).ConfigureAwait(false);
-        }
 
-        if (stillRunning.Count > 0)
+                return new QueueSubmissionCommitResult(replacement, removedIds.ToArray());
+            }
+            finally
+            {
+                await LockAsync(() => ReleaseSubmissionKeyUnderLock(submissionKey), CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (reservedIds.Length > 0)
+                {
+                    await LockAsync(() => ReleaseMutationsUnderLock(reservedIds), CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+        }
+        finally
         {
-            Log.Warning(
-                "Queue items {QueueItemIds} ignored cancellation and were not removed; " +
-                "their rows stay queued until the workers stop (restart the container to reclaim).",
-                string.Join(", ", stillRunning));
+            if (commitLockHeld)
+                _submissionCommitLock.Release();
         }
-
-        return stillRunning;
     }
 
     /// <summary>
@@ -426,7 +719,7 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
         await LockAsync(async () =>
         {
-            await dbClient.Ctx.QueueItems
+            var updatedCount = await dbClient.Ctx.QueueItems
                 .Where(item => queueItemIds.Contains(item.Id))
                 .ExecuteUpdateAsync(
                     s => s
@@ -434,6 +727,19 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                         .SetProperty(q => q.PauseUntil, (DateTime?)null),
                     ct)
                 .ConfigureAwait(false);
+            if (updatedCount > 0)
+            {
+                var updatedIds = await dbClient.Ctx.QueueItems
+                    .Where(item => queueItemIds.Contains(item.Id))
+                    .Select(item => item.Id)
+                    .ToListAsync(ct)
+                    .ConfigureAwait(false);
+                foreach (var id in updatedIds)
+                {
+                    _claimVersions[id] = Interlocked.Increment(ref _nextClaimVersion);
+                    ClearFallbackDeferral(id);
+                }
+            }
         }, ct).ConfigureAwait(false);
 
         AwakenQueue();
@@ -453,11 +759,24 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                 .Where(item => queueItemIds.Contains(item.Id));
             if (priority != QueueItem.PriorityOption.Paused)
             {
-                await update.ExecuteUpdateAsync(
+                var updatedCount = await update.ExecuteUpdateAsync(
                     s => s
                         .SetProperty(q => q.Priority, priority)
                         .SetProperty(q => q.PauseUntil, (DateTime?)null),
                     ct).ConfigureAwait(false);
+                if (updatedCount > 0)
+                {
+                    var updatedIds = await dbClient.Ctx.QueueItems
+                        .Where(item => queueItemIds.Contains(item.Id))
+                        .Select(item => item.Id)
+                        .ToListAsync(ct)
+                        .ConfigureAwait(false);
+                    foreach (var id in updatedIds)
+                    {
+                        _claimVersions[id] = Interlocked.Increment(ref _nextClaimVersion);
+                        ClearFallbackDeferral(id);
+                    }
+                }
             }
             else
             {
@@ -532,12 +851,15 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
     {
         if (queueItemIds.Count == 0) return [];
 
-        var inProgressIds = _inProgress.Keys.ToHashSet();
-        var eligibleIds = queueItemIds.Where(id => !inProgressIds.Contains(id)).ToList();
-        if (eligibleIds.Count == 0) return [];
-
+        List<Guid> eligibleIds = [];
         await LockAsync(async () =>
         {
+            var inProgressIds = _inProgress.Keys.ToHashSet();
+            eligibleIds = queueItemIds
+                .Where(id => !inProgressIds.Contains(id) && !_mutationReservations.ContainsKey(id))
+                .ToList();
+            if (eligibleIds.Count == 0) return;
+
             await dbClient.Ctx.QueueItems
                 .Where(item => eligibleIds.Contains(item.Id))
                 .ExecuteUpdateAsync(
@@ -747,7 +1069,13 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                 if (_inProgress.Count >= workerCount)
                     return false;
 
-                var excludeIds = _inProgress.Keys.ToHashSet();
+                var activeFallbackIds = _fallbackDeferrals
+                    .Where(kvp => kvp.Value > DateTime.Now)
+                    .Select(kvp => kvp.Key);
+                var excludeIds = _inProgress.Keys
+                    .Concat(_mutationReservations.Keys)
+                    .Concat(activeFallbackIds)
+                    .ToHashSet();
                 var reservedMountKeys = _inProgress.Values
                     .Select(x => (x.QueueItem.Category, x.QueueItem.JobName))
                     .ToHashSet();
@@ -775,6 +1103,15 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                     }
 
                     if (reservedMountKeys.Contains((claimed.item.Category, claimed.item.JobName)))
+                    {
+                        excludeIds.Add(claimed.item.Id);
+                        if (claimed.stream is not null)
+                            await claimed.stream.DisposeAsync().ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (_submissionKeyReservations.ContainsKey(
+                            (claimed.item.Category, claimed.item.FileName)))
                     {
                         excludeIds.Add(claimed.item.Id);
                         if (claimed.stream is not null)
@@ -811,6 +1148,9 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                     dbClient = new DavDatabaseClient(dbContext);
                 }
 
+                var claimVersion = Interlocked.Increment(ref _nextClaimVersion);
+                _claimVersions[queueItem.Id] = claimVersion;
+
                 // Treat a completed-but-not-yet-reaped primary as vacant so Fill
                 // can claim a new preferred worker without waiting for the next loop.
                 var isPrimary = _primaryId is null ||
@@ -836,7 +1176,8 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
                     workerCts,
                     queueDownloadContext,
                     queueContextRegistration,
-                    dbContext);
+                    dbContext,
+                    claimVersion);
 
                 _inProgress[queueItem.Id] = inProgress;
                 if (isPrimary)
@@ -1047,7 +1388,8 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
         CancellationTokenSource cts,
         QueueDownloadContext queueDownloadContext,
         CancellationTokenContext queueContextRegistration,
-        DavDatabaseContext dbContext
+        DavDatabaseContext dbContext,
+        long claimVersion
     )
     {
         // Per-item article cache; disposed with the worker.
@@ -1090,7 +1432,13 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             ShouldFailOnCancel = () => inProgressQueueItem.FailOnStuckCancel,
             // Terminal states (completed/failed) drop the stall counter; a plain
             // watchdog cancel leaves it so repeated stalls accumulate to the cap.
-            OnTerminal = () => _stallAttempts.TryRemove(queueItem.Id, out _),
+            OnTerminal = () =>
+            {
+                _stallAttempts.TryRemove(queueItem.Id, out _);
+                _claimVersions.TryRemove(queueItem.Id, out _);
+                ClearFallbackDeferral(queueItem.Id);
+            },
+            OnBackoffPersistenceFailed = (id, deadline) => RegisterClaimDeferralAsync(id, claimVersion, deadline),
         };
         var task = processor.ProcessAsync();
         inProgressQueueItem.ProcessingTask = task;
@@ -1411,7 +1759,16 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
             else if (dbClient is not null)
                 nextPause = await dbClient.GetNextQueueItemPauseUntil(ct).ConfigureAwait(false);
             else
-                return IdleDelay;
+                nextPause = null;
+
+            var activeFallbackNext = _fallbackDeferrals.Values
+                .Where(d => d > DateTime.Now)
+                .Select(d => (DateTime?)d)
+                .Min();
+            if (activeFallbackNext is not null && (nextPause is null || activeFallbackNext < nextPause.Value))
+            {
+                nextPause = activeFallbackNext.Value;
+            }
 
             if (nextPause is null) return IdleDelay;
 
@@ -1432,7 +1789,13 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        Task submissionsCompleted;
+        lock (_submissionLifetimeLock)
+        {
+            if (_disposed != 0) return;
+            _disposed = 1;
+            submissionsCompleted = _submissionsCompleted.Task;
+        }
 
         Task? coordinatorTask;
         CancellationTokenSource? cancellationTokenSource;
@@ -1457,7 +1820,21 @@ public sealed class QueueManager : IQueueCoordinator, IDisposable
 
         _configChangeSubscription.Dispose();
         _cancellationTokenSource?.Dispose();
-        if (_inProgress.IsEmpty)
+        var submissionsDrained = submissionsCompleted.Wait(SubmissionDrainTimeout);
+        if (!submissionsDrained)
+        {
+            Log.Warning(
+                "QueueManager shutdown reached its submission drain timeout; shared queue locks remain undisposed");
+        }
+
+        if (submissionsDrained)
+        {
+            _submissionCommitLock.Dispose();
+            foreach (var submissionLock in _submissionIdLocks)
+                submissionLock.Dispose();
+        }
+
+        if (submissionsDrained && _inProgress.IsEmpty)
         {
             _stateLock.Dispose();
             _finalizeLock.Dispose();

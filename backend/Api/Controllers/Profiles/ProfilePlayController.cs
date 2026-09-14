@@ -649,31 +649,64 @@ public class ProfilePlayController(
                 Log.Information(
                     "Removing orphan play-driven queue item {NzoId} after {IdleSeconds}s with no re-click",
                     nzoId, (int)idle.TotalSeconds);
-                await manager.RemoveQueueItemsAsync(new List<Guid> { nzoId }, freshDbClient, CancellationToken.None)
+                var removal = await manager.RemoveQueueItemsDetailedAsync(
+                        new List<Guid> { nzoId }, freshDbClient, CancellationToken.None)
                     .ConfigureAwait(false);
-                _playLastSeen.TryRemove(nzoId, out _);
+                if (removal.RemovedIds.Length > 0)
+                {
+                    _ = websocketManager.SendMessage(
+                        WebsocketTopic.QueueItemRemoved,
+                        string.Join(",", removal.RemovedIds));
+                }
+                if (removal.StillRunningIds.Contains(nzoId))
+                {
+                    _playLastSeen[nzoId] = DateTimeOffset.UtcNow;
+                    ScheduleOrphanCleanup(nzoId);
+                }
+                else
+                {
+                    _playLastSeen.TryRemove(nzoId, out _);
+                }
             }
             catch (Exception e) when (e is DbUpdateException or InvalidOperationException)
             {
                 Log.Debug(e, "Orphan cleanup for {NzoId} failed", nzoId);
-                _playLastSeen.TryRemove(nzoId, out _);
+                _playLastSeen[nzoId] = DateTimeOffset.UtcNow;
+                ScheduleOrphanCleanup(nzoId);
             }
         });
     }
 
     private async Task RemoveAbortedQueueItemAsync(Guid nzoId)
     {
-        _playLastSeen.TryRemove(nzoId, out _);
         try
         {
             await using var ctx = new DavDatabaseContext();
             var freshClient = new DavDatabaseClient(ctx);
-            await queueManager.RemoveQueueItemsAsync(new List<Guid> { nzoId }, freshClient, CancellationToken.None)
+            var removal = await queueManager.RemoveQueueItemsDetailedAsync(
+                    new List<Guid> { nzoId }, freshClient, CancellationToken.None)
                 .ConfigureAwait(false);
+            if (removal.RemovedIds.Length > 0)
+            {
+                _ = websocketManager.SendMessage(
+                    WebsocketTopic.QueueItemRemoved,
+                    string.Join(",", removal.RemovedIds));
+            }
+            if (removal.StillRunningIds.Contains(nzoId))
+            {
+                _playLastSeen[nzoId] = DateTimeOffset.UtcNow;
+                ScheduleOrphanCleanup(nzoId);
+            }
+            else
+            {
+                _playLastSeen.TryRemove(nzoId, out _);
+            }
         }
         catch (Exception e) when (e is DbUpdateException or InvalidOperationException)
         {
             Log.Debug(e, "Stall-failover abort cleanup failed for {NzoId}", nzoId);
+            _playLastSeen[nzoId] = DateTimeOffset.UtcNow;
+            ScheduleOrphanCleanup(nzoId);
         }
     }
 
