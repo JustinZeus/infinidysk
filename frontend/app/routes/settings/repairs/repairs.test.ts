@@ -34,10 +34,10 @@ const baseConfig: Record<string, string> = {
 
 describe("Repairs settings helpers", () => {
   it("maps health-check depth levels to slider positions", () => {
-    expect(["standard", "enhanced", "deep", "complete"].map(getHealthCheckDepthIndex)).toEqual([
-      0, 1, 2, 3,
-    ]);
-    expect(getHealthCheckDepthIndex("unknown")).toBe(0);
+    expect(
+      ["quick", "standard", "enhanced", "deep", "complete"].map(getHealthCheckDepthIndex),
+    ).toEqual([0, 1, 2, 3, 4]);
+    expect(getHealthCheckDepthIndex("unknown")).toBe(1);
   });
 
   it("detects PAR2 setting changes", () => {

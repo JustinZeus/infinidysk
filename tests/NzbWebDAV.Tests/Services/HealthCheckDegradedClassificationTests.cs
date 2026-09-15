@@ -257,6 +257,57 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task QuickCheck_DoesNotClassifyFullySampledDamagedFileAsDegraded()
+    {
+        var segments = NewSegmentIds(6);
+        var sizes = new long[] { 10_000, 10_000, 50, 10_000, 10_000, 10_000 };
+        var (item, _) = await AddVideoFileAsync("movie.mkv", segments, sizes);
+        _configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = ConfigKeys.RepairHealthcheckDepth,
+                ConfigValue = "quick",
+            },
+        ]);
+        var (service, _) = await NewServiceAsync(NewFakeClient(segments, missing: [2]), par2Outcome: false);
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        Assert.NotEqual(HealthCheckResult.HealthResult.Degraded, Assert.Single(GetHealthRows(item.Id)).Result);
+    }
+
+    [Fact]
+    public async Task QuickCheck_DoesNotRecheckPreviouslyRecordedHole()
+    {
+        var segments = NewSegmentIds(6);
+        var sizes = new long[] { 10_000, 10_000, 50, 10_000, 10_000, 10_000 };
+        var (item, blobId) = await AddVideoFileAsync(
+            "movie.mkv", segments, sizes, preExistingHoles: [2]);
+        _configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = ConfigKeys.RepairHealthcheckDepth,
+                ConfigValue = "quick",
+            },
+        ]);
+        var fake = NewFakeClient(segments, missing: [2]);
+        _failureTracker.RecordFailure(item.Id);
+        var (service, _) = await NewServiceAsync(fake, par2Outcome: false);
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        Assert.Equal(HealthCheckResult.HealthResult.Healthy, Assert.Single(GetHealthRows(item.Id)).Result);
+        Assert.DoesNotContain(segments[2], fake.StatRequestOrder);
+        Assert.Equal(blobId, ReloadItem(item.Id).FileBlobId);
+        var blob = await BlobStore.ReadBlob<DavNzbFile>(blobId);
+        Assert.NotNull(blob);
+        Assert.Equal([2], blob.MissingSegmentIndices!);
+        Assert.Equal(1, _failureTracker.GetFailureCount(item.Id));
+    }
+
+    [Fact]
     public async Task IdenticalRecheck_DoesNotRewriteBlob()
     {
         var segments = NewSegmentIds(6);
@@ -581,7 +632,8 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         ]);
         var segments = NewSegmentIds(6);
         var sizes = new long[] { 10_000, 10_000, 50, 10_000, 10_000, 10_000 };
-        var (item, oldBlobId) = await AddVideoFileAsync("movie.mkv", segments, sizes);
+        var (item, oldBlobId) = await AddVideoFileAsync(
+            "movie.mkv", segments, sizes, preExistingHoles: [2]);
         var fake = NewFakeClient(segments, missing: [2]);
         var (service, _) = await NewServiceAsync(fake, par2Outcome: false);
 
@@ -590,6 +642,7 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
         var row = Assert.Single(GetHealthRows(item.Id));
         Assert.Equal(HealthCheckResult.HealthResult.Unhealthy, row.Result);
         Assert.Equal(oldBlobId, ReloadItem(item.Id).FileBlobId);
+        Assert.Contains(segments[2], fake.StatRequestOrder);
     }
 
     [Fact]

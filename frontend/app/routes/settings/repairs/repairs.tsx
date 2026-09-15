@@ -38,12 +38,12 @@ function isWholeNumber(value: string) {
   return parsed >= -9_223_372_036_854_775_808n && parsed <= 9_223_372_036_854_775_807n;
 }
 
-const HEALTHCHECK_DEPTHS = ["standard", "enhanced", "deep", "complete"] as const;
-const HEALTHCHECK_DEPTH_LABELS = ["Standard", "Enhanced", "Deep", "Complete"] as const;
+const HEALTHCHECK_DEPTHS = ["quick", "standard", "enhanced", "deep", "complete"] as const;
+const HEALTHCHECK_DEPTH_LABELS = ["Quick", "Standard", "Enhanced", "Deep", "Complete"] as const;
 
 export function getHealthCheckDepthIndex(depth: string) {
   const index = HEALTHCHECK_DEPTHS.indexOf(depth as (typeof HEALTHCHECK_DEPTHS)[number]);
-  return index >= 0 ? index : 0;
+  return index >= 0 ? index : HEALTHCHECK_DEPTHS.indexOf("standard");
 }
 
 export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) {
@@ -261,7 +261,7 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
                   setNewConfig({
                     ...config,
                     "repair.healthcheck-depth":
-                      HEALTHCHECK_DEPTHS[Number(e.target.value)] ?? HEALTHCHECK_DEPTHS[0],
+                      HEALTHCHECK_DEPTHS[Number(e.target.value)] ?? "standard",
                   })
                 }
               />
@@ -277,8 +277,11 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
                 className="text-[11px] leading-relaxed text-base-content/45"
                 id="healthcheck-depth-help"
               >
-                How much of each file a health check verifies. Files up to 8000 segments are checked
-                in full, unless the aging option below is turned on. Above that, larger files are
+                How much of each file a health check verifies. Quick STATs only about two dozen
+                head/tail/stride segments per file regardless of size, a fast first pass that
+                reliably tells an intact posting from one lost to takedown or retention, but does
+                not run damage classification. Standard and above check files up to 8000 segments in
+                full, unless the aging option below is turned on; above that, larger files are
                 sampled from the start, end, and evenly spaced points in between, so a big release
                 costs a bounded number of STAT commands. Deeper settings verify more of each file
                 and use more usenet traffic. Complete checks every segment.
