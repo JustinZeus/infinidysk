@@ -130,6 +130,33 @@ public sealed class HealthCheckDegradedClassificationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RoutineHealthCheck_DoesNotOverwriteConcurrentUrgentRepair()
+    {
+        var segments = NewSegmentIds(3);
+        var (item, _) = await AddVideoFileAsync(
+            "movie.mkv", segments, [10_000, 10_000, 10_000]);
+
+        var headClient = new CapturingHeadNntpClient(NewFakeClient(segments, missing: []));
+        var (service, _) = await NewServiceAsync(headClient, par2Outcome: false);
+        service.BeforeHealthyFinalizationOverride = async id =>
+        {
+            await using var concurrentContext = new DavDatabaseContext(_options);
+            var concurrentItem = await concurrentContext.Items.SingleAsync(x => x.Id == id);
+            concurrentItem.NextHealthCheck = DateTimeOffset.UnixEpoch;
+            await concurrentContext.SaveChangesAsync();
+        };
+
+        await service.PerformHealthCheck(item, _dbClient, concurrency: 4, CancellationToken.None);
+
+        await using var verificationContext = new DavDatabaseContext(_options);
+        var durableItem = await verificationContext.Items.SingleAsync(x => x.Id == item.Id);
+        Assert.Equal(DateTimeOffset.UnixEpoch, durableItem.NextHealthCheck);
+        Assert.Empty(await verificationContext.HealthCheckResults
+            .Where(x => x.DavItemId == item.Id)
+            .ToListAsync());
+    }
+
+    [Fact]
     public async Task MissingReleaseDate_PrimaryHeadMissing_UsesLiveFallback()
     {
         var segments = NewSegmentIds(3);
