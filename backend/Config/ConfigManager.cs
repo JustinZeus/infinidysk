@@ -19,7 +19,9 @@ namespace NzbWebDAV.Config;
 public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
 {
     public static readonly string AppVersion = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_VERSION") ?? "0.0.0";
-    private long _nextProviderGeneration;
+    private long _nextProviderGeneration = Math.Max(
+        1L,
+        BitConverter.ToInt64(Guid.NewGuid().ToByteArray()) & long.MaxValue);
 
     private readonly ConcurrentDictionary<string, string> _invalidScheduleWarnings = new();
 
@@ -47,6 +49,12 @@ public class ConfigManager : IConfigReader, IConfigUpdater, IConfigChangeSource
     private IReadOnlyList<Regex>? _compiledExcludeCache;
     private ConfigEnvironmentOverlay _environmentOverlay = ConfigEnvironmentOverlay.Empty;
     private long _providerGeneration;
+
+    public ConfigManager()
+    {
+        _providerGeneration = _nextProviderGeneration;
+    }
+
     /// <summary>
     /// Raised after configuration values have been committed in memory. Notification is
     /// synchronous, in registration order, and does not run while config locks are held.

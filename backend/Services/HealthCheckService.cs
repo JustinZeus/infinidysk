@@ -1039,6 +1039,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
         CancellationToken ct
     )
     {
+        var providerGeneration = _configManager.GetUsenetProviderSnapshot().Generation;
         // Urgent sentinel set by ExceptionMiddleware when streaming confirms a permanent failure.
         // Skip the STAT-only recheck and repair immediately: STAT can pass while BODY returns 430
         // (see nzbdav-dev#209), and structurally corrupt archives can have every article present.
@@ -1207,7 +1208,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             {
                 await HandleConfirmedHolesAsync(
                         davItem, dbClient, nzbFile!, segments, segmentRanges!,
-                        statHoles, remainingCorrupt, repairsAdmitted, ct)
+                    statHoles, remainingCorrupt, repairsAdmitted, providerGeneration, ct)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1275,7 +1276,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             {
                 lock (_missingSegmentIds)
                 {
-                    var generation = e.ProviderGeneration ?? 0;
+                    var generation = e.ProviderGeneration ?? providerGeneration;
                     if (_missingSegmentIds.Add((generation, e.SegmentId)))
                         _missingSegmentOrder.Enqueue((generation, e.SegmentId));
                     while (_missingSegmentIds.Count > MaximumMissingSegmentIds)
@@ -1331,7 +1332,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                 return;
             }
 
-            await Repair(davItem, dbClient, ct).ConfigureAwait(false);
+            await Repair(davItem, dbClient, ct, providerGeneration: providerGeneration).ConfigureAwait(false);
         }
         catch (UsenetUnexpectedResponseException e)
         {
@@ -1439,6 +1440,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
         List<int> missingIndices,
         List<int> corruptIndices,
         bool repairsAdmitted,
+        long providerGeneration,
         CancellationToken ct)
     {
         if (!repairsAdmitted)
@@ -1518,8 +1520,8 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             // Seed the queue precheck with every confirmed miss so a re-grab of this release
             // fails fast pre-import (issue #732), then take today's repair path.
             if (FilenameUtil.IsImportantFileType(davItem.Name))
-                AddMissingSegmentIds(holeSegmentIds);
-            await Repair(davItem, dbClient, ct).ConfigureAwait(false);
+                AddMissingSegmentIds(holeSegmentIds, providerGeneration);
+            await Repair(davItem, dbClient, ct, providerGeneration: providerGeneration).ConfigureAwait(false);
             return;
         }
 
@@ -3070,7 +3072,8 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
         CancellationToken ct,
         bool forceDelete = false,
         bool forceDeleteIfUnlinked = false,
-        int? streamingFailureCount = null)
+        int? streamingFailureCount = null,
+        long? providerGeneration = null)
     {
         try
         {
@@ -3268,7 +3271,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                 {
                     try
                     {
-                        await SeedRejectedReleaseSegmentsAsync(davItem, dbClient, ct).ConfigureAwait(false);
+                        await SeedRejectedReleaseSegmentsAsync(davItem, dbClient, ct, providerGeneration).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -3283,7 +3286,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                 or ArrLinkedRepairDecision.RemoveAndBlocklistSucceededSearchWithheld)
             {
                 RecordRepairRemoval(linkedPath, DateTimeOffset.UtcNow);
-                await SeedRejectedReleaseSegmentsAsync(davItem, dbClient, ct).ConfigureAwait(false);
+                await SeedRejectedReleaseSegmentsAsync(davItem, dbClient, ct, providerGeneration).ConfigureAwait(false);
                 DeletionAuditLog.Record(
                     "health-repair",
                     davItem,
@@ -3604,12 +3607,14 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
     private async Task SeedRejectedReleaseSegmentsAsync(
         DavItem davItem,
         DavDatabaseClient dbClient,
-        CancellationToken ct)
+        CancellationToken ct,
+        long? providerGeneration = null)
     {
+        var generation = providerGeneration ?? _configManager.GetUsenetProviderSnapshot().Generation;
         try
         {
             var payload = await LoadHealthCheckPayloadAsync(davItem, dbClient, ct).ConfigureAwait(false);
-            AddMissingSegmentIds(EnumerateRejectedReleaseSeedSegments(payload.Segments));
+            AddMissingSegmentIds(EnumerateRejectedReleaseSeedSegments(payload.Segments), generation);
         }
         catch (OutOfMemoryException oom)
         {
@@ -3643,7 +3648,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             yield return segments[index];
     }
 
-    public static void AddMissingSegmentIds(IEnumerable<string> segmentIds, long generation = 0)
+    public static void AddMissingSegmentIds(IEnumerable<string> segmentIds, long generation)
     {
         lock (_missingSegmentIds)
         {
@@ -3656,6 +3661,12 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             }
         }
     }
+
+    public static void AddProviderMissingSegmentIds(IEnumerable<string> segmentIds, long generation) =>
+        AddMissingSegmentIds(segmentIds, generation);
+
+    public static void AddRejectedReleaseSegmentIds(IEnumerable<string> segmentIds, long generation) =>
+        AddMissingSegmentIds(segmentIds, generation);
 
     public static void CheckCachedMissingSegmentIds(IEnumerable<string> segmentIds, long generation = 0)
     {

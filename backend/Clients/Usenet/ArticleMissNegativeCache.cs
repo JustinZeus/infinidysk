@@ -51,9 +51,13 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
     private readonly Func<DavDatabaseContext>? _contextFactory;
     private readonly ConcurrentDictionary<(long Generation, string Key), DateTimeOffset> _missingAt = new();
     private readonly Channel<PersistenceWorkItem>? _persistenceQueue;
+    private readonly object _persistenceStateLock = new();
     private CancellationTokenSource? _persistenceLoopCts;
     private Task _persistenceLoop = Task.CompletedTask;
     private volatile bool _persistenceLoopStarted;
+    private bool _stopping;
+    private bool _persistenceLoopExited;
+    private Task? _pendingClearWrite;
     private int _cleanupRunning;
     private int _cleanupContinuationScheduled;
     private long _hits;
@@ -82,7 +86,7 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
                 {
                     SingleReader = true,
                     SingleWriter = false,
-                    FullMode = BoundedChannelFullMode.DropWrite,
+                    FullMode = BoundedChannelFullMode.Wait,
                 });
         }
 
@@ -137,7 +141,11 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
         if (generation is not { } evidenceGeneration) return;
         var now = DateTimeOffset.UtcNow;
         MarkMissingInMemory(evidenceGeneration, key, now);
-        _persistenceQueue?.Writer.TryWrite(new MarkItem(evidenceGeneration, key, now.ToUnixTimeMilliseconds()));
+        lock (_persistenceStateLock)
+        {
+            if (!_stopping)
+                _persistenceQueue?.Writer.TryWrite(new MarkItem(evidenceGeneration, key, now.ToUnixTimeMilliseconds()));
+        }
     }
 
     public void Clear() => _missingAt.Clear();
@@ -194,9 +202,14 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         if (_persistenceQueue is null) return;
-        _persistenceQueue.Writer.TryComplete();
+        var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_persistenceStateLock)
+            _stopping = true;
         try
         {
+            await _persistenceQueue.Writer.WriteAsync(new BarrierItem(barrier), cancellationToken)
+                .ConfigureAwait(false);
+            await barrier.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             await _persistenceLoop.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -209,7 +222,11 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
 
     public void Dispose()
     {
-        _persistenceQueue?.Writer.TryComplete();
+        lock (_persistenceStateLock)
+        {
+            _stopping = true;
+            _persistenceQueue?.Writer.TryComplete();
+        }
         _persistenceLoopCts?.Cancel();
         _persistenceLoopCts?.Dispose();
         _persistenceLoopCts = null;
@@ -344,20 +361,45 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
     private void EnqueueClear()
     {
         if (_persistenceQueue is null) return;
-        if (_persistenceQueue.Writer.TryWrite(ClearItem.Instance)) return;
-        // The queue is momentarily full of pending marks and drains quickly; wait
-        // for room so a provider-change clear is never dropped.
-        _ = Task.Run(async () =>
+        lock (_persistenceStateLock)
         {
-            try
-            {
-                await _persistenceQueue.Writer.WriteAsync(ClearItem.Instance).ConfigureAwait(false);
-            }
-            catch (ChannelClosedException)
-            {
-                // Shutdown raced the config change; nothing left to drain into.
-            }
-        });
+            if (_persistenceLoopExited) return;
+            if (_persistenceQueue.Writer.TryWrite(ClearItem.Instance)) return;
+            // The queue is momentarily full of pending marks and drains quickly; wait
+            // for room so a provider-change clear is never dropped.
+            _pendingClearWrite = _persistenceQueue.Writer.WriteAsync(ClearItem.Instance).AsTask();
+            _ = _pendingClearWrite.ContinueWith(
+                task =>
+                {
+                    if (task.IsFaulted && task.Exception is not null)
+                        Log.Debug(task.Exception, "Unable to enqueue provider-change article-miss clear.");
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    private bool TryExitPersistence(ChannelReader<PersistenceWorkItem> reader)
+    {
+        lock (_persistenceStateLock)
+        {
+            if (!_stopping || reader.TryPeek(out _)
+                || _pendingClearWrite is { IsCompleted: false })
+                return false;
+            _persistenceLoopExited = true;
+            _persistenceQueue!.Writer.TryComplete();
+            return true;
+        }
+    }
+
+    private void CompletePendingClearWriteIfFinished()
+    {
+        lock (_persistenceStateLock)
+        {
+            if (_pendingClearWrite?.IsCompleted == true)
+                _pendingClearWrite = null;
+        }
     }
 
     private async Task RunPersistenceLoopAsync(CancellationToken cancellationToken)
@@ -396,6 +438,8 @@ public sealed class ArticleMissNegativeCache : IHostedService, IDisposable
                     if (clearPending || marks.Count > 0)
                         await ApplyBatchAsync(clearPending, marks, cancellationToken).ConfigureAwait(false);
                     barrier?.TrySetResult();
+                    CompletePendingClearWriteIfFinished();
+                    if (barrier is not null && TryExitPersistence(reader)) return;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {

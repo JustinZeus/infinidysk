@@ -1339,12 +1339,21 @@ public class MultiProviderNntpClient(
         NntpOperation operation)
     {
         if (segmentId is not { } id) return;
+        AttachProviderGeneration(exception);
         if (ClassifyException(exception) != SegmentFetch.FetchStatus.Missing) return;
         if (exception.TryGetCausingException<UsenetMismatchedArticleException>(out _))
             return;
         var group = NormalizeStorageGroup(provider.StorageGroup);
         if (group.Length > 0) missingGroups.Add(group);
         MarkCachedMissing(id, provider, operation);
+    }
+
+    private void AttachProviderGeneration(Exception exception)
+    {
+        if (providerGeneration is not { } generation) return;
+        if (exception.TryGetCausingException(out UsenetArticleNotFoundException? notFound) &&
+            notFound is not null && notFound.ProviderGeneration is null)
+            notFound.ProviderGeneration = generation;
     }
 
     private static string CacheKey(SegmentId segmentId, MultiConnectionNntpClient provider,

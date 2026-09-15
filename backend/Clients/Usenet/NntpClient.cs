@@ -447,7 +447,7 @@ public abstract class NntpClient : INntpClient
         }
     }
 
-    private static async Task<PipelinedBodyResult> MapPipelinedBodyResultAsync
+    private async Task<PipelinedBodyResult> MapPipelinedBodyResultAsync
     (
         Task<UsenetDecodedBodyResponse> responseTask,
         string segmentId,
@@ -508,7 +508,7 @@ public abstract class NntpClient : INntpClient
                 Found = false,
                 Stream = null,
                 DefinitivelyMissing = true,
-                ProviderGeneration = e.ProviderGeneration,
+                ProviderGeneration = e.ProviderGeneration ?? ProviderGeneration,
             };
         }
     }
