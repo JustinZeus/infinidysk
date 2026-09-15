@@ -129,7 +129,7 @@ public static class FetchFirstSegmentsStep
                     // important file, in which case remaining checks cannot help.
                     Log.Warning("First segment for `{FileName}` missing across all providers",
                         files[i].GetSubjectFileName());
-                    results[i] = BuildMissingFirstSegment(files[i]);
+                    results[i] = BuildMissingFirstSegment(files[i], article.ProviderGeneration);
                     progress?.Report(++completed);
 
                     if (DeadNzbFailFast.IsImportantNzbFile(files[i]))
@@ -205,11 +205,11 @@ public static class FetchFirstSegmentsStep
         {
             return (index, await FetchFirstSegment(nzbFile, usenetClient, cancellationToken).ConfigureAwait(false));
         }
-        catch (UsenetArticleNotFoundException)
+        catch (UsenetArticleNotFoundException e)
         {
             Log.Warning("First segment for `{FileName}` missing across all providers",
                 nzbFile.GetSubjectFileName());
-            return (index, BuildMissingFirstSegment(nzbFile));
+            return (index, BuildMissingFirstSegment(nzbFile, e.ProviderGeneration));
         }
 #pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
         catch (Exception e) when (!e.IsCancellationException() && e is not OutOfMemoryException)
@@ -224,13 +224,15 @@ public static class FetchFirstSegmentsStep
         }
     }
 
-    private static NzbFileWithFirstSegment BuildMissingFirstSegment(NzbFile nzbFile) => new()
+    private static NzbFileWithFirstSegment BuildMissingFirstSegment(
+        NzbFile nzbFile, long? providerGeneration = null) => new()
     {
         NzbFile = nzbFile,
         First16KB = null,
         Header = null,
         MissingFirstSegment = true,
         ReleaseDate = DateTimeOffset.UtcNow,
+        ProviderGeneration = providerGeneration,
     };
 
     private static async Task<NzbFileWithFirstSegment> BuildFirstSegment
@@ -316,9 +318,9 @@ public static class FetchFirstSegmentsStep
                 ReleaseDate = article.ArticleHeaders!.Date
             };
         }
-        catch (UsenetArticleNotFoundException)
+        catch (UsenetArticleNotFoundException e)
         {
-            return BuildMissingFirstSegment(nzbFile);
+            return BuildMissingFirstSegment(nzbFile, e.ProviderGeneration);
         }
         catch (Exception e) when (
 #pragma warning disable CA2016 // CA2016: classify cancellation regardless of the ambient token -- forwarding it would misclassify cancellations from internal timeout/child tokens
@@ -341,6 +343,7 @@ public static class FetchFirstSegmentsStep
         public required byte[]? First16KB { get; init; }
         public required bool MissingFirstSegment { get; init; }
         public required DateTimeOffset ReleaseDate { get; init; }
+        public long? ProviderGeneration { get; init; }
 
         public bool HasRar4Magic() => HasMagic(Rar4Magic);
         public bool HasRar5Magic() => HasMagic(Rar5Magic);
