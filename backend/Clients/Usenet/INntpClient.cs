@@ -129,8 +129,7 @@ public interface INntpClient : IDisposable
         HashSet<string>? knownCorruptSegmentIds = null,
         IReadOnlySet<int>? knownMissingSegmentIndices = null,
         bool segmentByteRangesTrusted = true,
-        long? readBudgetOverride = null,
-        Par2FileProof? verificationProof = null);
+        long? readBudgetOverride = null);
 
     Task CheckAllSegmentsAsync(
         IEnumerable<string> segmentIds, int concurrency, IProgress<int>? progress, CancellationToken cancellationToken);

@@ -13,7 +13,6 @@ public class NzbFile
 {
     public required string Subject { get; init; }
     public List<NzbSegment> Segments { get; } = [];
-    public Par2FileProof? VerificationProof { get; set; }
     private bool _rejectInferredSegmentByteRanges;
     private bool _inferredSegmentByteRangesValidated;
 

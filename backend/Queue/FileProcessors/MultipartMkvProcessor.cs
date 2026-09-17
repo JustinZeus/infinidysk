@@ -67,7 +67,6 @@ public class MultipartMkvProcessor : BaseProcessor
                 SegmentByteRanges = rangeIndex.Ranges,
                 SegmentByteRangesTrusted = rangeIndex.IsTrusted,
                 SegmentFallbackIds = fileInfo.NzbFile.GetSegmentFallbackIds(),
-                VerificationProof = fileInfo.NzbFile.VerificationProof,
             });
         }
 

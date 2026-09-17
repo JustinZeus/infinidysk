@@ -38,7 +38,10 @@ internal static class ArchiveSetGrouping
                     rarGroups.Add(key, candidates);
                 }
 
-                var descriptor = GetUniqueCandidate(candidates, candidate => candidate.FileInfos.All(existing =>
+                var descriptor = volumeValue.Scheme == FilenameUtil.RarVolumeScheme.Part &&
+                                 volumeOrdinal == 0
+                    ? null
+                    : GetUniqueCandidate(candidates, candidate => candidate.FileInfos.All(existing =>
                         FilenameUtil.GetRarVolumeName(existing.FileName)?.Ordinal != volumeOrdinal));
                 if (descriptor is null)
                 {

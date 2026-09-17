@@ -1,6 +1,5 @@
 ﻿using System.Buffers.Binary;
 using System.Text;
-using NzbWebDAV.Models;
 
 namespace NzbWebDAV.Par2Recovery.Packets
 {
@@ -18,7 +17,6 @@ namespace NzbWebDAV.Par2Recovery.Packets
         public byte[] File16kHash { get; protected set; } = null!;
         public ulong FileLength { get; protected set; }
         public string FileName { get; internal set; } = null!;
-        public Par2FileProof? VerificationProof { get; internal set; }
 
         public FileDesc(Par2PacketHeader header) : base(header)
         {

@@ -51,8 +51,7 @@ public class DatabaseStoreNzbFile(
             streamingBodyBatchWidth: Config.GetStreamingBodyBatchWidth(),
             knownCorruptSegmentIds: ResolveKnownCorruptSegmentIds(nzbFile),
             knownMissingSegmentIndices: ResolveKnownMissingSegmentIndices(nzbFile),
-            segmentByteRangesTrusted: nzbFile.SegmentByteRangesTrusted == true,
-            verificationProof: nzbFile.VerificationProof);
+            segmentByteRangesTrusted: nzbFile.SegmentByteRangesTrusted == true);
     }
 
     private HashSet<string>? ResolveKnownCorruptSegmentIds(DavNzbFile nzbFile)
