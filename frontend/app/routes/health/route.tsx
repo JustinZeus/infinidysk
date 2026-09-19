@@ -13,7 +13,7 @@ import { useWebsocketTopics } from "~/utils/shared-websocket";
 import { Alert, Button, Icon, PageHeader } from "~/components/ui";
 import { useIsReadOnly } from "~/auth/authorization";
 import type {
-  HealthCheckQueueResponse,
+  HealthCheckQueueItem,
   HealthCheckScheduleStatus,
   HealthResult,
   RepairAction,
@@ -21,6 +21,7 @@ import type {
 import {
   completeHealthCheck,
   getVisibleHealthCheckItems,
+  mergeActiveHealthCheckItems,
   mergeHealthCheckQueue,
   parseHealthItemProgressMessage,
   parseHealthItemStatusMessage,
@@ -216,23 +217,32 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
   // effects
   useEffect(() => {
-    if (queueItems.length >= 15) return;
+    if (!isEnabled) return;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const refetchData = async () => {
-      const response = await fetch(withUrlBase("/api/get-health-check-queue?pageSize=30"));
-      if (response.ok) {
-        // /api/get-health-check-queue returns HealthCheckQueueResponse
-        const healthCheckQueue = (await response.json()) as HealthCheckQueueResponse;
-        setQueueState((state) =>
-          mergeHealthCheckQueue(state, {
-            items: healthCheckQueue.items,
-            uncheckedCount: healthCheckQueue.uncheckedCount,
-          }),
-        );
-        if (healthCheckQueue.schedule) setSchedule(healthCheckQueue.schedule);
+      try {
+        const response = await fetch(withUrlBase("/api/get-active-health-checks"), {
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const activeHealthChecks = (await response.json()) as { items: HealthCheckQueueItem[] };
+        if (controller.signal.aborted) return;
+        setQueueState((state) => mergeActiveHealthCheckItems(state, activeHealthChecks.items));
+      } catch {
+        if (controller.signal.aborted) return;
+      } finally {
+        if (!controller.signal.aborted) {
+          timeout = setTimeout(() => void refetchData(), 5000);
+        }
       }
     };
-    void refetchData(); // fire-and-forget queue refill
-  }, [queueItems.length]);
+    void refetchData();
+    return () => {
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [isEnabled]);
 
   // events
   const onHealthItemStatus = useCallback(

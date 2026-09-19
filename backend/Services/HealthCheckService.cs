@@ -194,6 +194,10 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
     internal Func<Guid, Task>? BeforeHealthyFinalizationOverride { get; set; }
     internal IReadOnlyCollection<Guid> InProgressHealthCheckIds => _inProgress.Keys.ToArray();
 
+    public IReadOnlyDictionary<Guid, int> GetActiveHealthCheckProgress() => _inProgress
+        .Where(entry => entry.Value.ProcessingTask?.IsCompleted != true)
+        .ToDictionary(entry => entry.Key, entry => entry.Value.Progress);
+
     public HealthCheckDiagnosticsSnapshot CaptureHealthCheckDiagnostics()
     {
         var now = _timeProvider.GetUtcNow();
@@ -205,14 +209,14 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             RecentHealthCheckCapacity,
             _inProgress.Values.Select(worker => worker.GetDiagnosticSnapshot(now))
                 .Where(attempt => attempt.FinishedAtUtc is null).ToArray(),
-                GetRecentHealthChecks());
+            GetRecentHealthChecks());
     }
 
-            private HealthCheckAttemptSnapshot[] GetRecentHealthChecks()
-            {
-            lock (_recentHealthChecksLock)
-                return _recentHealthChecks.ToArray();
-            }
+    private HealthCheckAttemptSnapshot[] GetRecentHealthChecks()
+    {
+        lock (_recentHealthChecksLock)
+            return _recentHealthChecks.ToArray();
+    }
 
     public HealthCheckService
     (
@@ -916,6 +920,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
         private Task? _cancellationTask;
         private int _disposed;
         private int _progressState;
+        private int _progress;
         private readonly Lock _diagnosticLock = new();
         private string? _fileName;
         private string? _path;
@@ -929,6 +934,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
 
         public ContextualCancellationTokenSource Cancellation { get; } = cancellation;
         public Task? ProcessingTask { get; set; }
+        public int Progress => Volatile.Read(ref _progress);
 
         public void SetDiagnosticFile(string fileName, string path)
         {
@@ -993,11 +999,12 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
             }
         }
 
-        public bool TryPublishProgress(Action publish)
+        public bool TryPublishProgress(int progress, Action publish)
         {
             lock (_progressLock)
             {
                 if ((_progressState & ProgressClosedFlag) != 0) return false;
+                Volatile.Write(ref _progress, Math.Clamp(progress, 0, 100));
                 publish();
                 return true;
             }
@@ -1301,6 +1308,7 @@ public class HealthCheckService : BackgroundService, IHealthCheckQuiescence
                         return;
 
                     _ = progressWorker.TryPublishProgress(
+                        progress,
                         () => _ = _websocketManager.SendMessage(
                             WebsocketTopic.HealthItemProgress,
                             message));
