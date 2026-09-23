@@ -602,7 +602,8 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
 
         if (_failFastOnFirstSegment && segmentIndex == 0)
         {
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            if (!ProviderReadEvidence.IsUnproven(failure))
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
             failure.LogWarningKnownOrStack(
                 "First article {SegmentId} persistently corrupt at playback start while reading {FileName}. " +
                 "Failing the stream so the player surfaces an error.",
@@ -613,7 +614,8 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
 
         if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out _))
         {
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            if (!ProviderReadEvidence.IsUnproven(failure))
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
             throw CreateUnknownLengthFailure(segmentIndex, failure);
         }
 
@@ -822,7 +824,8 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         catch (UsenetCorruptArticleException confirmation)
         {
             persistent.NoteOrThrow(confirmation);
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            if (!ProviderReadEvidence.IsUnproven(corrupt))
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
             ExceptionDispatchInfo.Capture(corrupt).Throw();
             throw;
         }
@@ -833,7 +836,8 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                 "Confirmation re-fetch of corrupt segment {SegmentId} of {FileName} failed",
                 segmentId,
                 _fileName);
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            if (!ProviderReadEvidence.IsUnproven(corrupt))
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
             ExceptionDispatchInfo.Capture(corrupt).Throw();
             throw;
         }
@@ -876,7 +880,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         bool isCorruption,
         bool healthConfirmed = false)
     {
-        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnprovenMiss(cause);
+        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnproven(cause);
         _consecutiveZeroFills++;
         _openSegmentHole = true;
         if (reportHole) PlaybackHoleTracker.RecordHole(_fileName, segmentId, cause);

@@ -1208,7 +1208,8 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
 
                         if (_failFastOnFirstSegment && isFirstSegment)
                         {
-                            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+                            if (!ProviderReadEvidence.IsUnproven(e))
+                                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
                             e.LogWarningKnownOrStack(
                                 "First article {SegmentId} persistently corrupt at playback start while reading {FileName}. " +
                                 "Failing the stream so the player surfaces an error.",
@@ -1458,7 +1459,8 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
             {
                 if (_failFastOnFirstSegment && isFirstSegment)
                 {
-                    Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+                    if (!ProviderReadEvidence.IsUnproven(persistent))
+                        Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
                     throw;
                 }
                 return ZeroFillSegment(
@@ -1812,7 +1814,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         Exception exception,
         bool healthConfirmed = false)
     {
-        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnprovenMiss(exception);
+        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnproven(exception);
         if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out var isExact))
         {
             if (reportHole && exception.TryGetCausingException(out UsenetCorruptArticleException? _))

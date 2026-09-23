@@ -2977,6 +2977,8 @@ public class MultiProviderNntpClientTests
         public Func<Exception>? FaultBatchResponsesWith { get; init; }
         public Func<string, Exception>? SingularException { get; init; }
         public bool DeferSingularCompletion { get; init; }
+        /// <summary>Body of a successful BODY, by article; an empty yEnc body when unset.</summary>
+        public Func<string, YencStream>? SuccessStream { get; init; }
         public int BatchRequests { get; private set; }
         public int SingularRequests { get; private set; }
         private readonly Queue<ArticleBodyCompletionHandler> _pendingSingularCallbacks = new();
@@ -3041,7 +3043,7 @@ public class MultiProviderNntpClientTests
             _ => ArticleBodyResult.NotRetrieved,
         };
 
-        private static UsenetDecodedBodyResponse CreateResponse(SegmentId segmentId, int responseCode)
+        private UsenetDecodedBodyResponse CreateResponse(SegmentId segmentId, int responseCode)
         {
             var success = responseCode == (int)UsenetResponseType.ArticleRetrievedBodyFollows;
             return new UsenetDecodedBodyResponse
@@ -3049,7 +3051,9 @@ public class MultiProviderNntpClientTests
                 SegmentId = segmentId.ToString(),
                 ResponseCode = responseCode,
                 ResponseMessage = $"{responseCode} scripted response",
-                Stream = success ? new YencStream(new MemoryStream([], writable: false)) : null,
+                Stream = success
+                    ? SuccessStream?.Invoke(segmentId.ToString()) ?? new YencStream(new MemoryStream([], writable: false))
+                    : null,
             };
         }
 

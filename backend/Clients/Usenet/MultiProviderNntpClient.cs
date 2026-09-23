@@ -641,7 +641,10 @@ public class MultiProviderNntpClient(
                 _usageTracker.RecordSuccess(primaryProvider.MetricsKey);
                 RecordFetch(primaryProvider.MetricsKey, SegmentFetch.FetchStatus.Ok,
                     primaryStopwatch.ElapsedMilliseconds, 0, fetchWorkload, primaryTraceRange);
-                return WrapProviderResponse(response, primaryProvider.MetricsKey);
+                // The primary is the first provider asked for this article in the batch;
+                // earlier batch providers that failed already mark the coverage incomplete.
+                return WrapProviderResponse(
+                    response, primaryProvider.MetricsKey, new ServedWalkCoverage(true, coverage));
             }
 
             var definitiveMiss = response != null &&
@@ -796,7 +799,8 @@ public class MultiProviderNntpClient(
                                 provider.MetricsKey, SegmentFetch.FetchStatus.Ok,
                                 stopwatch.ElapsedMilliseconds, priorMisses?.Count ?? 0,
                                 fetchWorkload, traceRange, priorMisses);
-                            response = WrapProviderResponse(response, provider.MetricsKey);
+                            response = WrapProviderResponse(
+                                response, provider.MetricsKey, ServedWalk(walk, coverage));
                             gateOwnedByTransfer = true;
                             deferredCallback.Activate((result, failureReason) =>
                             {
@@ -1136,7 +1140,7 @@ public class MultiProviderNntpClient(
                     RecordSuccessfulFetch(
                         provider.MetricsKey, SegmentFetch.FetchStatus.Ok,
                         stopwatch.ElapsedMilliseconds, attemptIndex, fetchWorkload, traceRange, priorMisses);
-                    result = WrapProviderResponse(result, provider.MetricsKey);
+                    result = WrapProviderResponse(result, provider.MetricsKey, ServedWalk(walk, coverage));
                     deferredCallback.Activate(onConnectionReadyAgain ?? ((_, _) => { }));
                     return result;
                 }
@@ -1354,7 +1358,7 @@ public class MultiProviderNntpClient(
                     RecordSuccessfulFetch(
                         provider.MetricsKey, SegmentFetch.FetchStatus.Ok,
                         stopwatch.ElapsedMilliseconds, attemptIndex, fetchWorkload, traceRange, priorMisses);
-                    result = WrapProviderResponse(result, provider.MetricsKey);
+                    result = WrapProviderResponse(result, provider.MetricsKey, ServedWalk(walk, coverage));
                 }
                 else if (result is UsenetDecodedBodyResponse or UsenetDecodedArticleResponse)
                 {
@@ -1573,6 +1577,16 @@ public class MultiProviderNntpClient(
             walk.IsPureDefinitiveMiss && walk.CachedSkips == 0 && walk.StorageGroupSkips == 0,
             coverage);
     }
+
+    /// <summary>
+    /// A provider that serves a copy later found corrupt only settles the article when no
+    /// enabled provider was passed over first: every earlier attempt was a definitive miss.
+    /// </summary>
+    private static ServedWalkCoverage ServedWalk(ProviderWalkSummary walk, ProviderSelectionCoverage coverage) =>
+        new(
+            walk.Attempts - 1 == walk.CurrentDefinitiveMisses
+                && walk.CachedSkips == 0 && walk.StorageGroupSkips == 0,
+            coverage);
 
     private static void LogProviderWalkOutcome(
         ProviderWalkSummary walk,
@@ -1872,27 +1886,33 @@ public class MultiProviderNntpClient(
             misses);
     }
 
-    private T WrapProviderResponse<T>(T result, string metricsKey) where T : UsenetResponse
+    private T WrapProviderResponse<T>(T result, string metricsKey, ServedWalkCoverage served)
+        where T : UsenetResponse
     {
         return result switch
         {
             UsenetDecodedBodyResponse b
                 => (T)(object)(b with
                 {
-                    Stream = WrapProviderStream(b.Stream!, b.SegmentId, metricsKey)
+                    Stream = WrapProviderStream(b.Stream!, b.SegmentId, metricsKey, served)
                 }),
             UsenetDecodedArticleResponse a
                 => (T)(object)(a with
                 {
-                    Stream = WrapProviderStream(a.Stream!, a.SegmentId, metricsKey)
+                    Stream = WrapProviderStream(a.Stream!, a.SegmentId, metricsKey, served)
                 }),
             _ => result,
         };
     }
 
-    private YencStream WrapProviderStream(YencStream stream, SegmentId segmentId, string metricsKey)
+    private YencStream WrapProviderStream(
+        YencStream stream, SegmentId segmentId, string metricsKey, ServedWalkCoverage served)
     {
-        YencStream wrapped = new CorruptionDetectingYencStream(stream, segmentId, metricsKey);
+        YencStream wrapped = new CorruptionDetectingYencStream(stream, segmentId, metricsKey)
+        {
+            ReadEvidence = ProviderReadEvidence.Current,
+            ServedWalk = served,
+        };
         if (bytesTracker != null)
             wrapped = new CountingYencStream(wrapped, bytesTracker, metricsKey, activeReadRegistry);
         return wrapped;
