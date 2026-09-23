@@ -27,6 +27,7 @@ public class ExceptionMiddleware(
 {
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentMissingArticles = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentUnprovenMissingArticles = new();
+    private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentUnprovenCorruptArticles = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentConnectionLimitErrors = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentSeekErrors = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentReadErrors = new();
@@ -167,11 +168,44 @@ public class ExceptionMiddleware(
             AbortStartedResponse(context);
         }
         catch (Exception e) when (
-            e.TryGetCausingException(out UsenetCorruptArticleException? corrupt) &&
-            e is not OutOfMemoryException &&
-            e is not TransientSegmentExhaustionException &&
-            e is not SeekPositionNotFoundException &&
-            !context.RequestAborted.IsCancellationRequested)
+            IsCorruptArticleFailure(e, context, out var unprovenCorrupt) &&
+            UnprovenCorruptionReason(context, e) is { } reason)
+        {
+            // The walk that served this copy passed over an enabled provider that may hold an
+            // intact one. Preserve a retryable result instead of scheduling repair.
+            if (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = 503;
+                context.Response.Headers.RetryAfter = "5";
+            }
+
+            var filePath = GetRequestFilePath(context);
+            var segmentId = unprovenCorrupt!.SegmentId;
+            var provider = unprovenCorrupt.ProviderKey;
+            LogWithDedup(RecentUnprovenCorruptArticles, $"{filePath}|{segmentId}", suppressed =>
+            {
+                if (suppressed > 0)
+                    Log.Warning(
+                        "File {FilePath} article {SegmentId} was corrupt from {Provider} but is not confirmed unrecoverable because {Reason}. Returning 503 so the client can retry. (suppressed {SuppressedCount} duplicates in last 60s)",
+                        filePath,
+                        segmentId,
+                        provider,
+                        reason,
+                        suppressed);
+                else
+                    Log.Warning(
+                        "File {FilePath} article {SegmentId} was corrupt from {Provider} but is not confirmed unrecoverable because {Reason}. Returning 503 so the client can retry.",
+                        filePath,
+                        segmentId,
+                        provider,
+                        reason);
+            });
+            Log.Debug(e, "File {FilePath} unproven corrupt-article stack", filePath);
+
+            AbortStartedResponse(context);
+        }
+        catch (Exception e) when (IsCorruptArticleFailure(e, context, out var corrupt))
         {
             if (!context.Response.HasStarted)
             {
@@ -714,6 +748,22 @@ public class ExceptionMiddleware(
         ProviderReadEvidence.FromRequestItems(context.Items)?.IncompleteReasonFrom(exception);
 
     /// <summary>
+    /// The walk that served a corrupt copy, recorded when its body failed validation, decides
+    /// whether another enabled provider could still hold an intact one.
+    /// </summary>
+    private static string? UnprovenCorruptionReason(HttpContext context, Exception exception) =>
+        ProviderReadEvidence.FromRequestItems(context.Items)?.IncompleteCorruptionReasonFrom(exception);
+
+    /// <summary>Corrupt-article failures answered by the corrupt-article handlers.</summary>
+    private static bool IsCorruptArticleFailure(
+        Exception e, HttpContext context, out UsenetCorruptArticleException? corrupt) =>
+        e.TryGetCausingException(out corrupt) &&
+        e is not OutOfMemoryException &&
+        e is not TransientSegmentExhaustionException &&
+        e is not SeekPositionNotFoundException &&
+        !context.RequestAborted.IsCancellationRequested;
+
+    /// <summary>
     /// Streaming is the only check that reaches freshly imported (history-linked) items, so a
     /// missing article discovered mid-stream must feed the step-0 queue precheck. Otherwise a
     /// re-grab of the same broken release imports cleanly again and loops through repair
@@ -936,6 +986,11 @@ public class ExceptionMiddleware(
         {
             if (kvp.Value.LastLogged < cutoff)
                 RecentUnprovenMissingArticles.TryRemove(kvp.Key, out _);
+        }
+        foreach (var kvp in RecentUnprovenCorruptArticles)
+        {
+            if (kvp.Value.LastLogged < cutoff)
+                RecentUnprovenCorruptArticles.TryRemove(kvp.Key, out _);
         }
         foreach (var kvp in RecentConnectionLimitErrors)
         {

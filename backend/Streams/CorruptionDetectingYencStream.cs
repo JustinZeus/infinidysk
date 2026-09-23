@@ -1,3 +1,4 @@
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Exceptions;
 using Serilog;
 using UsenetSharp.Models;
@@ -14,6 +15,12 @@ public sealed class CorruptionDetectingYencStream(
     string providerKey) : YencStream(Null)
 {
     private int _reported;
+
+    /// <summary>The read that fetched this body; absent outside a WebDAV read.</summary>
+    internal ProviderReadEvidence? ReadEvidence { get; init; }
+
+    /// <summary>How completely the walk that served this body covered the enabled providers.</summary>
+    internal ServedWalkCoverage ServedWalk { get; init; }
 
     public override async ValueTask<UsenetYencHeader?> GetYencHeadersAsync(
         CancellationToken cancellationToken = default)
@@ -59,6 +66,7 @@ public sealed class CorruptionDetectingYencStream(
                 segmentId);
         }
 
+        ReadEvidence?.RecordCorruptServe(segmentId, providerKey, ServedWalk);
         return new UsenetCorruptArticleException(segmentId, providerKey, exception);
     }
 

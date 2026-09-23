@@ -309,7 +309,8 @@ public sealed partial class UnprovenMissingArticleTests
         int StatusCode,
         bool Aborted,
         int StreamingFailures,
-        IReadOnlyList<LogEvent> Logs);
+        IReadOnlyList<LogEvent> Logs,
+        string RetryAfter);
 
     /// <summary>
     /// Runs <paramref name="read"/> inside the same read-evidence scope the WebDAV read
@@ -348,7 +349,8 @@ public sealed partial class UnprovenMissingArticleTests
             context.Response.StatusCode,
             lifetime.Aborted,
             failureTracker.GetFailureCount(davItem.Id),
-            logs);
+            logs,
+            context.Response.Headers.RetryAfter.ToString());
     }
 
     private static MultiProviderNntpClient TwoProviders(
