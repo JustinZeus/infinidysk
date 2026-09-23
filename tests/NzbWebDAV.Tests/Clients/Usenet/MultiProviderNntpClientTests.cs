@@ -2975,7 +2975,8 @@ public class MultiProviderNntpClientTests
         public Action? OnRequest { get; init; }
         public Func<int, Exception?>? BatchException { get; init; }
         public Func<Exception>? FaultBatchResponsesWith { get; init; }
-        public Func<string, Exception>? SingularException { get; init; }
+        /// <summary>Failure of a singular request, by article; null serves the article.</summary>
+        public Func<string, Exception?>? SingularException { get; init; }
         public bool DeferSingularCompletion { get; init; }
         /// <summary>Body of a successful BODY, by article; an empty yEnc body when unset.</summary>
         public Func<string, YencStream>? SuccessStream { get; init; }
@@ -3018,8 +3019,8 @@ public class MultiProviderNntpClientTests
         {
             SingularRequests++;
             OnRequest?.Invoke();
-            if (SingularException != null)
-                throw SingularException(segmentId.ToString());
+            if (SingularException?.Invoke(segmentId.ToString()) is { } singularFailure)
+                throw singularFailure;
 
             var response = CreateResponse(segmentId, SingularResponseCode);
             if (DeferSingularCompletion && onConnectionReadyAgain != null)
@@ -3070,8 +3071,8 @@ public class MultiProviderNntpClientTests
         {
             SingularRequests++;
             OnRequest?.Invoke();
-            if (SingularException != null)
-                throw SingularException(segmentId.ToString());
+            if (SingularException?.Invoke(segmentId.ToString()) is { } singularFailure)
+                throw singularFailure;
 
             var responseCode = StatResponseCode ?? SingularResponseCode;
             return Task.FromResult(new UsenetStatResponse

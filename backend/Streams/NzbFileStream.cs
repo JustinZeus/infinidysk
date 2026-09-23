@@ -290,7 +290,7 @@ public class NzbFileStream(
             }
             catch (UsenetArticleNotFoundException e)
             {
-                missingProbeArticle = e;
+                missingProbeArticle = ProviderReadEvidence.PreferUnproven(missingProbeArticle, e);
                 Log.Warning(
                     "Seek probe hit missing article {SegmentId} (segment index {Index}) while reading {FileName}. Using estimated range.",
                     e.SegmentId, guess, string.IsNullOrEmpty(fileName) ? "unknown" : fileName);
@@ -428,7 +428,7 @@ public class NzbFileStream(
         }
         catch (UsenetArticleNotFoundException e)
         {
-            missing = e;
+            missing = ProviderReadEvidence.PreferUnproven(missing, e);
         }
         catch (Exception e) when (IsFallbackEligibleProbeFailure(e, ct))
         {
@@ -449,10 +449,10 @@ public class NzbFileStream(
                         return fallback;
                     firstNonContaining ??= fallback;
                 }
-                catch (UsenetArticleNotFoundException e) { missing = e; }
+                catch (UsenetArticleNotFoundException e) { missing = ProviderReadEvidence.PreferUnproven(missing, e); }
                 catch (Exception e) when (IsFallbackEligibleProbeFailure(e, ct))
                 {
-                    transientProbeFailure = e;
+                    transientProbeFailure = ProviderReadEvidence.PreferUnproven(transientProbeFailure, e);
                     e.LogWarningKnownOrStack(
                         "Authoritative seek probe transient failure on fallback segment index {Index}; trying next fallback.",
                         index);
@@ -465,6 +465,9 @@ public class NzbFileStream(
 
         if (transientProbeFailure is not null)
         {
+            // Every article id probed for this position must be proven before its failure is.
+            if (missing is not null)
+                ProviderReadEvidence.Current?.InheritAlternateVerdict(transientProbeFailure, missing);
             if (transientProbeFailure is InvalidDataException invalidGeometry)
             {
                 throw new SeekPositionNotFoundException(

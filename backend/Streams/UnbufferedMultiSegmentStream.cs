@@ -211,10 +211,10 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                     await HandleCorruptionAsync(segmentIndex, segmentId, e, cancellationToken)
                         .ConfigureAwait(false);
                 }
-                catch (SeekPositionNotFoundException)
+                catch (SeekPositionNotFoundException positioning)
                 {
                     var fallback = await TryFallbackSegmentsAsync(
-                            segmentIndex, GetRecoveryState(segmentIndex, segmentId), cancellationToken)
+                            segmentIndex, GetRecoveryState(segmentIndex, segmentId), positioning, cancellationToken)
                         .ConfigureAwait(false);
                     if (fallback is not null)
                     {
@@ -590,7 +590,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             }
         }
 
-        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, cancellationToken)
+        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, failure, cancellationToken)
             .ConfigureAwait(false);
         if (fallback is not null)
         {
@@ -630,7 +630,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
     {
         var state = GetRecoveryState(segmentIndex, segmentId);
         await ResetCandidateAsync(segmentIndex).ConfigureAwait(false);
-        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, cancellationToken)
+        var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, failure, cancellationToken)
             .ConfigureAwait(false);
         if (fallback is not null)
         {
@@ -689,9 +689,9 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
                     .ConfigureAwait(false);
                 return;
             }
-            catch (SeekPositionNotFoundException)
+            catch (SeekPositionNotFoundException positioning)
             {
-                var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, cancellationToken)
+                var fallback = await TryFallbackSegmentsAsync(segmentIndex, state, positioning, cancellationToken)
                     .ConfigureAwait(false);
                 if (fallback is not null)
                 {
@@ -920,9 +920,14 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         return count;
     }
 
+    /// <summary>
+    /// Tries the segment's alternate article ids. An alternate that fails without proof
+    /// leaves <paramref name="primaryFailure"/> unproven as well.
+    /// </summary>
     private async Task<Stream?> TryFallbackSegmentsAsync(
         int segmentIndex,
         SegmentRecoveryState state,
+        Exception primaryFailure,
         CancellationToken cancellationToken)
     {
         if (_segmentFallbacks is null ||
@@ -971,18 +976,20 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
             {
                 await DisposeBodyStreamAsync(fallbackStream).ConfigureAwait(false);
             }
-            catch (UsenetArticleNotFoundException)
+            catch (UsenetArticleNotFoundException alternateMissing)
             {
                 await DisposeBodyStreamAsync(fallbackStream).ConfigureAwait(false);
+                ProviderReadEvidence.Current?.InheritAlternateVerdict(primaryFailure, alternateMissing);
                 // A playback fail-fast raised by FetchBodyAsync must escape instead of
                 // walking every fallback ID and recording an extra hole per attempt.
                 if (PlaybackHoleTracker.ShouldFailFast(_fileName, out var failFast) && failFast is not null)
                     ExceptionDispatchInfo.Capture(failFast).Throw();
             }
-            catch (UsenetCorruptArticleException)
+            catch (UsenetCorruptArticleException alternateCorrupt)
             {
                 // Corrupt fallback — try the next alternate MessageId.
                 await DisposeBodyStreamAsync(fallbackStream).ConfigureAwait(false);
+                ProviderReadEvidence.Current?.InheritAlternateVerdict(primaryFailure, alternateCorrupt);
             }
             catch (UsenetUnexpectedResponseException e)
             {
