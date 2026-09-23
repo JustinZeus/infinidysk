@@ -223,6 +223,9 @@ public class GetWebdavItemController(
             HttpContext.Items["readSessionId"] = sessionId;
             using var scope = providerUsageTracker.BeginScope(sessionId);
             using var metricsScope = MultiProviderNntpClient.BeginReadSessionScope(sessionId);
+            // Published to the request here so the HTTP error boundary can still tell a
+            // proven miss from an unproven one after this scope unwinds.
+            using var readEvidence = ProviderReadEvidence.BeginRequest(HttpContext);
 
             // Bound the initial backend wait (store lookup + stream open). Cleared once
             // body copy starts — mid-stream stalls use per-segment timeouts. See

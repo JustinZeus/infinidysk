@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Streams;
@@ -70,7 +71,8 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
             return null;
         }
 
-        if (Volatile.Read(ref _disposed) != 0 || !_config.IsSharedStreamsEnabled())
+        if (Volatile.Read(ref _disposed) != 0 || !_config.IsSharedStreamsEnabled()
+            || ProviderReadEvidence.RequiresFreshWalk)
         {
             _tracker.RecordSharedAttachMiss(SharedStreamAttachMissReason.Ineligible);
             return null;
@@ -114,6 +116,7 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
             return null;
         }
 
+        using var evidenceScope = reserved.ReadEvidence.BeginScope();
         try
         {
             readerCt.ThrowIfCancellationRequested();
@@ -121,8 +124,9 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
                 .ConfigureAwait(false);
             reserved.BindAndStart(lease);
         }
-        catch
+        catch (Exception exception)
         {
+            reserved.ReadEvidence.TagFailure(exception);
             ForgetReservation(path, reserved);
             reserved.AbandonOpening();
             throw;

@@ -96,6 +96,7 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
     internal SharedStreamReapReason ReapReason => _reapReason;
     internal TimeProvider TimeProvider => _timeProvider;
     internal CancellationToken EntryToken => _entryCts.Token;
+    internal ProviderReadEvidence ReadEvidence { get; } = new();
 
     internal Action<SharedStreamEntry, SharedStreamReapReason>? OnReaped { get; set; }
     internal Action<long>? OnRingRetainedBytes { get; set; }
@@ -286,6 +287,8 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
     private async Task PumpLoopAsync()
     {
         var scratch = SharedStreamAccountingPool.PumpScratch.Rent(_chunkSize);
+        // Producer construction and the detached pump must share the same evidence.
+        using var evidenceScope = ReadEvidence.BeginScope();
         try
         {
             var upstream = _upstream
@@ -344,6 +347,7 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
                     EntryId, Path, Anchor);
             }
 
+            ReadEvidence.TagFailure(ex);
             _ring.SetFailure(ex);
             lock (_lock)
             {
