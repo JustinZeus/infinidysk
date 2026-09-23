@@ -7,6 +7,7 @@ using NWebDav.Server.Helpers;
 using NWebDav.Server.Props;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
@@ -75,6 +76,8 @@ public class GetAndHeadHandlerPatch : IRequestHandler
     /// </returns>
     public async Task<bool> HandleRequestAsync(HttpContext httpContext)
     {
+        // Stream construction may start article fetches before the response body is copied.
+        using var readEvidence = ProviderReadEvidence.BeginRequest(httpContext);
         // Obtain request and response
         var request = httpContext.Request;
         var response = httpContext.Response;

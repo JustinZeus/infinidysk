@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using NzbWebDAV.Clients.Usenet.Contexts;
 
 namespace NzbWebDAV.Streams;
 
@@ -60,6 +61,7 @@ internal static class PlaybackHoleTracker
     public static bool ShouldFailFast(string? path, out Exception? exception)
     {
         exception = null;
+        if (ProviderReadEvidence.RequiresFreshWalk) return false;
         if (!IsTrackablePath(path) || !Files.TryGetValue(path!, out var state))
             return false;
 

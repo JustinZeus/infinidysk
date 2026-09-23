@@ -1155,7 +1155,7 @@ public class ExceptionMiddlewareTests
         return context;
     }
 
-    private static DefaultHttpContext CreateDavItemContext(
+    internal static DefaultHttpContext CreateDavItemContext(
         bool hasStarted,
         TestHttpRequestLifetimeFeature lifetimeFeature)
     {
@@ -1184,7 +1184,7 @@ public class ExceptionMiddlewareTests
         return configManager;
     }
 
-    private static ConfigManager CreateRepairEnabledConfig()
+    internal static ConfigManager CreateRepairEnabledConfig()
     {
         var arrConfig = new ArrConfig
         {
@@ -1229,7 +1229,7 @@ public class ExceptionMiddlewareTests
         }
     }
 
-    private sealed class TestHttpRequestLifetimeFeature : IHttpRequestLifetimeFeature
+    internal sealed class TestHttpRequestLifetimeFeature : IHttpRequestLifetimeFeature
     {
         public bool Aborted { get; private set; }
         public CancellationToken RequestAborted { get; set; }

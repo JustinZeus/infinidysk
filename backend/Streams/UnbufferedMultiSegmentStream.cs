@@ -73,7 +73,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         _firstSegmentFileOffset = firstSegmentFileOffset;
         _failFastOnFirstSegment = failFastOnFirstSegment;
         _knownCorruptSegmentIds = knownCorruptSegmentIds;
-        _knownMissingSegmentIndices = knownMissingSegmentIndices;
+        _knownMissingSegmentIndices = ProviderReadEvidence.RequiresFreshWalk ? null : knownMissingSegmentIndices;
         _expectedFirstSegmentRange = expectedFirstSegmentRange;
         _expectedFirstSegmentRangeWasClippedAtFileEnd = expectedFirstSegmentRangeWasClippedAtFileEnd;
     }
@@ -875,6 +875,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         Exception cause,
         bool isCorruption)
     {
+        ProviderReadEvidence.ThrowIfIncomplete(cause);
         _consecutiveZeroFills++;
         _openSegmentHole = true;
         PlaybackHoleTracker.RecordHole(_fileName, segmentId, cause);

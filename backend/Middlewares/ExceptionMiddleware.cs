@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using NWebDav.Server.Helpers;
 using NzbWebDAV.Api.Errors;
 using NzbWebDAV.Api.SabControllers;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -25,6 +26,7 @@ public class ExceptionMiddleware(
     IDbContextFactory<DavDatabaseContext>? dbContextFactory = null)
 {
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentMissingArticles = new();
+    private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentUnprovenMissingArticles = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentConnectionLimitErrors = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentSeekErrors = new();
     private static readonly ConcurrentDictionary<string, (DateTime LastLogged, int SuppressedCount)> RecentReadErrors = new();
@@ -94,6 +96,41 @@ public class ExceptionMiddleware(
                     Log.Warning(warning, filePath, reason);
             });
             Log.Debug(e, "WebDAV streaming-write-timeout stack");
+        }
+        catch (Exception e) when (
+            e.TryGetCausingException(out UsenetArticleNotFoundException? unproven) &&
+            e is not OutOfMemoryException &&
+            UnprovenMissReason(context, e) is { } reason)
+        {
+            // A provider the walk could not reach may still hold this article. Preserve a
+            // retryable result instead of reporting terminal absence or scheduling repair.
+            if (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = 503;
+            }
+
+            var filePath = GetRequestFilePath(context);
+            var segmentId = unproven!.SegmentId;
+            LogWithDedup(RecentUnprovenMissingArticles, $"{filePath}|{segmentId}", suppressed =>
+            {
+                if (suppressed > 0)
+                    Log.Warning(
+                        "File {FilePath} article {SegmentId} could not be confirmed missing because {Reason}. Returning 503 so the client can retry. (suppressed {SuppressedCount} duplicates in last 60s)",
+                        filePath,
+                        segmentId,
+                        reason,
+                        suppressed);
+                else
+                    Log.Warning(
+                        "File {FilePath} article {SegmentId} could not be confirmed missing because {Reason}. Returning 503 so the client can retry.",
+                        filePath,
+                        segmentId,
+                        reason);
+            });
+            Log.Debug(e, "File {FilePath} unproven missing-article stack", filePath);
+
+            AbortStartedResponse(context);
         }
         catch (Exception e) when (e.TryGetCausingException(out UsenetArticleNotFoundException? notFound) && e is not OutOfMemoryException)
         {
@@ -272,6 +309,24 @@ public class ExceptionMiddleware(
                 Log.Warning(
                     "WebDAV read deferred. Path={Path} Reason: {Reason} SuppressedCount={SuppressedCount}",
                     filePath, "provider circuit admission unavailable", suppressed));
+        }
+        catch (Exception e) when (
+            e is not OutOfMemoryException && IsDavItemRequest(context) &&
+            (e.TryGetCausingException<ProviderTransferAdmissionTimeoutException>(out _)
+                || e.TryGetCausingException<NntpClientRetiredException>(out _)))
+        {
+            if (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers.RetryAfter = "5";
+            }
+            var filePath = GetRequestFilePath(context);
+            LogWithDedup(RecentReadErrors, "provider-unavailable|" + filePath, suppressed =>
+                Log.Warning(
+                    "WebDAV read deferred. Path={Path} Reason: {Reason} SuppressedCount={SuppressedCount}",
+                    filePath, e.Message, suppressed));
+            AbortStartedResponse(context);
         }
         catch (Exception e) when (e.TryGetCausingException(out StreamingReadTimeoutException? _) && e is not OutOfMemoryException)
         {
@@ -650,6 +705,23 @@ public class ExceptionMiddleware(
     }
 
     /// <summary>
+    /// Why a missing-article failure does not prove the article is gone: either this
+    /// request's own read scope recorded an incomplete provider walk, or the failure came
+    /// from a shared upstream pump that recorded one and tagged it on the way out. Null
+    /// when the miss is proven, and null when the request carried no read evidence at all.
+    /// </summary>
+    private static string? UnprovenMissReason(HttpContext context, Exception exception)
+    {
+        if (ProviderReadEvidence.IncompleteReasonFrom(exception) is { } taggedReason)
+            return taggedReason;
+        var evidence = ProviderReadEvidence.FromRequestItems(context.Items);
+        return evidence is { IsComplete: false }
+               && (evidence.HasTerminalWalk || !ProviderReadEvidence.HasCompleteFailureEvidence(exception))
+            ? evidence.IncompleteReason
+            : null;
+    }
+
+    /// <summary>
     /// Streaming is the only check that reaches freshly imported (history-linked) items, so a
     /// missing article discovered mid-stream must feed the step-0 queue precheck. Otherwise a
     /// re-grab of the same broken release imports cleanly again and loops through repair
@@ -867,6 +939,11 @@ public class ExceptionMiddleware(
         {
             if (kvp.Value.LastLogged < cutoff)
                 RecentMissingArticles.TryRemove(kvp.Key, out _);
+        }
+        foreach (var kvp in RecentUnprovenMissingArticles)
+        {
+            if (kvp.Value.LastLogged < cutoff)
+                RecentUnprovenMissingArticles.TryRemove(kvp.Key, out _);
         }
         foreach (var kvp in RecentConnectionLimitErrors)
         {

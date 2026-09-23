@@ -2920,7 +2920,9 @@ public class MultiProviderNntpClientTests
         ProviderType providerType = ProviderType.Pooled,
         int maxConnections = 1,
         int priority = 0,
-        int? maxTransferConnections = null)
+        int? maxTransferConnections = null,
+        long? byteLimit = null,
+        long bytesUsedOffset = 0)
     {
         var pool = new ConnectionPool<INntpClient>(
             maxConnections, _ => ValueTask.FromResult(connection));
@@ -2929,6 +2931,8 @@ public class MultiProviderNntpClientTests
             providerType,
             circuitBreaker ?? new ProviderCircuitBreaker(host),
             host,
+            byteLimit: byteLimit,
+            bytesUsedOffset: bytesUsedOffset,
             priority: priority,
             storageGroup: storageGroup,
             maxTransferConnections: maxTransferConnections);
