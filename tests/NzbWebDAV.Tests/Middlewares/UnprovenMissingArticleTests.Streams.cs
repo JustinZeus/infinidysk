@@ -19,7 +19,9 @@ public sealed partial class UnprovenMissingArticleTests
     [InlineData(2, true)]
     public async Task IncompleteMissWithFallbackIds_StillGapFillsWithoutRepair(int bufferSize, bool pipelined)
     {
+        using var reports = await RepairReportCapture.CreateAsync();
         var segmentId = NewSegmentId();
+        var path = $"/content/{Guid.NewGuid():N}.mkv";
         var fallbackId = NewSegmentId();
         var requested = new ConcurrentBag<string>();
         var answering = new MultiProviderNntpClientTests.ScriptedNntpClient
@@ -44,7 +46,7 @@ public sealed partial class UnprovenMissingArticleTests
             await using var stream = MultiSegmentStream.Create(
                 new[] { segmentId }.AsMemory(), client, bufferSize, 8,
                 failFastOnFirstSegment: false, usePipelinedBodyRequests: pipelined,
-                CancellationToken.None, fileName: segmentId,
+                CancellationToken.None, fileName: path,
                 segmentFallbacks: [[fallbackId]], exactSegmentSizes: new long[] { 8 });
             bytesRead = await stream.ReadAsync(buffer, CancellationToken.None);
         });
@@ -52,7 +54,8 @@ public sealed partial class UnprovenMissingArticleTests
         Assert.Equal(StatusCodes.Status200OK, probe.StatusCode);
         Assert.Equal(8, bytesRead);
         Assert.Equal(new byte[8], buffer);
-        Assert.False(PlaybackHoleTracker.IsKnownMissingSegment(segmentId, segmentId));
+        Assert.False(PlaybackHoleTracker.IsKnownMissingSegment(path, segmentId));
+        Assert.DoesNotContain(reports.Reports, report => report.Path == path);
         Assert.Equal(0, probe.StreamingFailures);
         Assert.Contains(fallbackId, requested);
         AssertNotSeededForFailFast(segmentId);
