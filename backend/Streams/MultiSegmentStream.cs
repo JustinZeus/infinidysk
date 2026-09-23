@@ -1312,7 +1312,8 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 "Article {SegmentId} is a health-confirmed missing segment of {FileName}. Filling the {Bytes}-byte gap without a provider request.",
                 segmentId,
                 segmentIndex,
-                missing);
+                missing,
+                healthConfirmed: true);
         }
         finally
         {
@@ -1808,12 +1809,13 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         string messageTemplate,
         string segmentId,
         int segmentIndex,
-        Exception exception)
+        Exception exception,
+        bool healthConfirmed = false)
     {
-        ProviderReadEvidence.ThrowIfIncomplete(exception);
+        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnprovenMiss(exception);
         if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out var isExact))
         {
-            if (exception.TryGetCausingException(out UsenetCorruptArticleException? _))
+            if (reportHole && exception.TryGetCausingException(out UsenetCorruptArticleException? _))
                 Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
             throw CreateUnknownLengthFailure(segmentId, segmentIndex, exception);
         }
@@ -1825,12 +1827,14 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 fill, _fileName, segmentId);
         }
 
-        if (exception.TryGetCausingException(out UsenetCorruptArticleException? _))
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
-        else
-            Par2RepairTriggerSink.Current?.ReportZeroFill(_fileName, segmentId, segmentIndex, fill);
-
-        PlaybackHoleTracker.RecordHole(_fileName, segmentId, exception);
+        if (reportHole)
+        {
+            if (exception.TryGetCausingException(out UsenetCorruptArticleException? _))
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            else
+                Par2RepairTriggerSink.Current?.ReportZeroFill(_fileName, segmentId, segmentIndex, fill);
+            PlaybackHoleTracker.RecordHole(_fileName, segmentId, exception);
+        }
 
 #pragma warning disable CA2000 // gap-fill stream ownership transfers to the returned SegmentDownloadResult
         return SegmentDownloadResult.ZeroFill(

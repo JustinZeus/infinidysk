@@ -542,11 +542,11 @@ public class MultiProviderNntpClient(
                     lastException = ExceptionDispatchInfo.Capture(exception);
                     coverage = coverage with { OmittedForOtherReason = true };
                 }
-                catch (Exception e) when (e.TryGetCausingException(out UsenetArticleNotFoundException? _) && e is not OutOfMemoryException)
+                catch (Exception e) when (e.TryGetCausingException(out UsenetArticleNotFoundException? missing) && e is not OutOfMemoryException)
                 {
                     deferredCallback.Discard();
                     await AbandonProviderAttemptAsync(primaryBatch, attemptCts).ConfigureAwait(false);
-                    ProviderReadEvidence.Current?.RecordTerminalWalk(false, coverage);
+                    ProviderReadEvidence.Current?.RecordTerminalWalk(missing!.SegmentId, false, coverage);
                     // Invalid / permanently missing segment ids are invalid on every provider.
                     ArticleBodyCompletion.InvokeContained(
                         CompleteBatchFetches, ArticleBodyResult.NotRetrieved);
@@ -894,7 +894,7 @@ public class MultiProviderNntpClient(
                 : lastAttemptedProvider.Host;
             walk.LastOutcomeWasException = terminalFailure is not null
                 && ClassifyException(terminalFailure.SourceException) != SegmentFetch.FetchStatus.Missing;
-            RecordTerminalWalk(walk, coverage);
+            RecordTerminalWalk(segmentId, walk, coverage);
             if (terminalFailure?.SourceException is ProviderTransferAdmissionTimeoutException
                 or CircuitAdmissionRejectedException)
                 LogInconclusiveAdmissionFailure(terminalProvider, terminalFailure.SourceException);
@@ -1159,7 +1159,7 @@ public class MultiProviderNntpClient(
                 walk.UnexpectedResponses++;
                 RecordFetch(provider.MetricsKey, SegmentFetch.FetchStatus.Protocol,
                     stopwatch.ElapsedMilliseconds, attemptIndex, fetchWorkload, traceRange);
-                RecordTerminalWalk(walk, coverage);
+                RecordTerminalWalk(segmentId, walk, coverage);
                 ArticleBodyCompletion.InvokeContained(
                     onConnectionReadyAgain, ArticleBodyResult.NotRetrieved);
                 return result;
@@ -1220,7 +1220,7 @@ public class MultiProviderNntpClient(
             ? inconclusiveAdmissionProvider
             : lastAttemptedProvider?.Host;
         walk.LastOutcomeWasException = terminalFailure is not null;
-        RecordTerminalWalk(walk, coverage);
+        RecordTerminalWalk(segmentId, walk, coverage);
         if (terminalFailure?.SourceException is ProviderTransferAdmissionTimeoutException
             or CircuitAdmissionRejectedException)
             LogInconclusiveAdmissionFailure(terminalProvider, terminalFailure.SourceException);
@@ -1362,7 +1362,7 @@ public class MultiProviderNntpClient(
                     walk.UnexpectedResponses++;
                     RecordFetch(provider.MetricsKey, SegmentFetch.FetchStatus.Protocol,
                         stopwatch.ElapsedMilliseconds, attemptIndex, fetchWorkload, traceRange);
-                    RecordTerminalWalk(walk, coverage);
+                    RecordTerminalWalk(articleId, walk, coverage);
                 }
                 // STAT/HEAD/DATE successes: intentionally no SegmentFetch row (not a segment transfer;
                 // matches StatsPipelinedAsync which records nothing).
@@ -1420,7 +1420,7 @@ public class MultiProviderNntpClient(
             ? inconclusiveAdmissionProvider
             : lastAttemptedProvider?.Host;
         walk.LastOutcomeWasException = terminalFailure is not null;
-        RecordTerminalWalk(walk, coverage);
+        RecordTerminalWalk(articleId, walk, coverage);
         if (terminalFailure?.SourceException is ProviderTransferAdmissionTimeoutException
             or CircuitAdmissionRejectedException)
             LogInconclusiveAdmissionFailure(terminalProvider, terminalFailure.SourceException);
@@ -1566,9 +1566,10 @@ public class MultiProviderNntpClient(
     /// Only a pure definitive miss over a fully covered provider set proves the article
     /// is gone; anything else leaves the read unable to justify a 404.
     /// </summary>
-    private static void RecordTerminalWalk(ProviderWalkSummary walk, ProviderSelectionCoverage coverage)
+    private static void RecordTerminalWalk(SegmentId? segmentId, ProviderWalkSummary walk, ProviderSelectionCoverage coverage)
     {
         ProviderReadEvidence.Current?.RecordTerminalWalk(
+            segmentId?.ToString(),
             walk.IsPureDefinitiveMiss && walk.CachedSkips == 0 && walk.StorageGroupSkips == 0,
             coverage);
     }
@@ -2197,7 +2198,6 @@ public class MultiProviderNntpClient(
         var primary = orderedProviders.Count > 0 ? orderedProviders[0] : null;
         if (primary == null)
         {
-            ProviderReadEvidence.Current?.RecordTerminalWalk(false, coverage);
             yield break;
         }
 
@@ -2213,14 +2213,14 @@ public class MultiProviderNntpClient(
             {
                 hasResult = await results.MoveNextAsync().ConfigureAwait(false);
             }
-            catch (UsenetArticleNotFoundException)
+            catch (UsenetArticleNotFoundException missing)
             {
-                ProviderReadEvidence.Current?.RecordTerminalWalk(orderedProviders.Count == 1, coverage);
+                ProviderReadEvidence.Current?.RecordTerminalWalk(missing.SegmentId, orderedProviders.Count == 1, coverage);
                 throw;
             }
             if (!hasResult) break;
             if (!results.Current.Exists)
-                ProviderReadEvidence.Current?.RecordTerminalWalk(orderedProviders.Count == 1, coverage);
+                ProviderReadEvidence.Current?.RecordTerminalWalk(results.Current.SegmentId, orderedProviders.Count == 1, coverage);
             yield return results.Current;
         }
     }
@@ -2236,13 +2236,12 @@ public class MultiProviderNntpClient(
         // already records metrics / wraps streams for byte counting.
         int effectiveDepth;
         {
-            var orderedProviders = SelectOrderedProviders(NntpOperation.PipelinedBody, out var reserved, out var coverage);
+            var orderedProviders = SelectOrderedProviders(NntpOperation.PipelinedBody, out var reserved);
             using var releasePending = new ScopeReleaser(
                 () => reserved?.ReleasePending(NntpOperation.PipelinedBody));
             var primary = orderedProviders.Count > 0 ? orderedProviders[0] : null;
             if (primary == null)
             {
-                ProviderReadEvidence.Current?.RecordTerminalWalk(false, coverage);
                 yield break;
             }
             effectiveDepth = ResolveDepth(primary, depth);

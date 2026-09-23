@@ -108,6 +108,7 @@ public class ExceptionMiddleware(
             {
                 context.Response.Clear();
                 context.Response.StatusCode = 503;
+                context.Response.Headers.RetryAfter = "5";
             }
 
             var filePath = GetRequestFilePath(context);
@@ -705,21 +706,12 @@ public class ExceptionMiddleware(
     }
 
     /// <summary>
-    /// Why a missing-article failure does not prove the article is gone: either this
-    /// request's own read scope recorded an incomplete provider walk, or the failure came
-    /// from a shared upstream pump that recorded one and tagged it on the way out. Null
-    /// when the miss is proven, and null when the request carried no read evidence at all.
+    /// The failing article's own walk, including a verdict adopted at a shared-reader
+    /// delivery boundary, determines whether this request can justify a missing response.
+    /// A cached exception is not fresh request evidence.
     /// </summary>
-    private static string? UnprovenMissReason(HttpContext context, Exception exception)
-    {
-        if (ProviderReadEvidence.IncompleteReasonFrom(exception) is { } taggedReason)
-            return taggedReason;
-        var evidence = ProviderReadEvidence.FromRequestItems(context.Items);
-        return evidence is { IsComplete: false }
-               && (evidence.HasTerminalWalk || !ProviderReadEvidence.HasCompleteFailureEvidence(exception))
-            ? evidence.IncompleteReason
-            : null;
-    }
+    private static string? UnprovenMissReason(HttpContext context, Exception exception) =>
+        ProviderReadEvidence.FromRequestItems(context.Items)?.IncompleteReasonFrom(exception);
 
     /// <summary>
     /// Streaming is the only check that reaches freshly imported (history-linked) items, so a

@@ -17,7 +17,7 @@ public sealed partial class UnprovenMissingArticleTests
     [InlineData(0, false)]
     [InlineData(2, false)]
     [InlineData(2, true)]
-    public async Task IncompleteMissWithFallbackIds_NeverGapFillsOrRepairs(int bufferSize, bool pipelined)
+    public async Task IncompleteMissWithFallbackIds_StillGapFillsWithoutRepair(int bufferSize, bool pipelined)
     {
         var segmentId = NewSegmentId();
         var fallbackId = NewSegmentId();
@@ -36,6 +36,9 @@ public sealed partial class UnprovenMissingArticleTests
                 MissingProviderClient(), host: "open.example", circuitBreaker: OpenBreaker("open.example")),
             MultiProviderNntpClientTests.CreateProvider(answering, host: "healthy.example"));
 
+        var buffer = new byte[8];
+        Array.Fill(buffer, (byte)0x7f);
+        var bytesRead = 0;
         var probe = await RunReadAsync(async () =>
         {
             await using var stream = MultiSegmentStream.Create(
@@ -43,10 +46,13 @@ public sealed partial class UnprovenMissingArticleTests
                 failFastOnFirstSegment: false, usePipelinedBodyRequests: pipelined,
                 CancellationToken.None, fileName: segmentId,
                 segmentFallbacks: [[fallbackId]], exactSegmentSizes: new long[] { 8 });
-            await stream.ReadAsync(new byte[8], CancellationToken.None);
+            bytesRead = await stream.ReadAsync(buffer, CancellationToken.None);
         });
 
-        Assert.Equal(StatusCodes.Status503ServiceUnavailable, probe.StatusCode);
+        Assert.Equal(StatusCodes.Status200OK, probe.StatusCode);
+        Assert.Equal(8, bytesRead);
+        Assert.Equal(new byte[8], buffer);
+        Assert.False(PlaybackHoleTracker.IsKnownMissingSegment(segmentId, segmentId));
         Assert.Equal(0, probe.StreamingFailures);
         Assert.Contains(fallbackId, requested);
         AssertNotSeededForFailFast(segmentId);
@@ -91,6 +97,44 @@ public sealed partial class UnprovenMissingArticleTests
         Assert.Equal(0, firstProbe.StreamingFailures);
         Assert.Equal(0, secondProbe.StreamingFailures);
         AssertNotSeededForFailFast(segmentId);
+    }
+
+    [Fact]
+    public async Task SharedFailureProof_CannotCertifyACachedReplayInAnotherRequest()
+    {
+        var segmentId = NewSegmentId();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var client = TwoProviders(
+            MultiProviderNntpClientTests.CreateProvider(MissingProviderClient(), host: "first.example"),
+            MultiProviderNntpClientTests.CreateProvider(MissingProviderClient(), host: "second.example"));
+        await using var entry = new SharedStreamEntry(
+            $"/content/{Guid.NewGuid():N}.mkv", 0, 8, 64,
+            TimeSpan.FromSeconds(10), CancellationToken.None, chunkSize: 8, leadBytes: 8);
+        entry.BindAndStart(new DetachedStreamLease
+        {
+            Stream = new WalkThenSurfaceMissStream(gate, client, segmentId),
+            Ownership = NullAsyncDisposable.Instance,
+            ContentIdentity = new SharedContentIdentity(segmentId, null, 8),
+        });
+        await using var reader = entry.TryAttach(0, NoFallback, out _);
+        Assert.NotNull(reader);
+        Exception? delivered = null;
+        var firstProbe = await RunReadAsync(async () =>
+        {
+            gate.SetResult();
+            try { await reader.ReadAsync(new byte[8], CancellationToken.None); }
+            catch (Exception exception)
+            {
+                delivered = exception;
+                throw;
+            }
+        });
+
+        Assert.Equal(StatusCodes.Status404NotFound, firstProbe.StatusCode);
+        Assert.NotNull(delivered);
+        var replay = await RunReadAsync(() => Task.FromException(delivered));
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, replay.StatusCode);
+        Assert.Equal(0, replay.StreamingFailures);
     }
 
     private sealed class PrefetchedMissSource(

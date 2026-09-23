@@ -116,6 +116,7 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
             return null;
         }
 
+        var readerEvidence = ProviderReadEvidence.Current;
         using var evidenceScope = reserved.ReadEvidence.BeginScope();
         try
         {
@@ -126,7 +127,7 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
         }
         catch (Exception exception)
         {
-            reserved.ReadEvidence.TagFailure(exception);
+            readerEvidence?.AdoptFailure(reserved.ReadEvidence, exception);
             ForgetReservation(path, reserved);
             reserved.AbandonOpening();
             throw;
