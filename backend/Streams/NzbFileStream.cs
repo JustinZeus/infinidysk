@@ -565,12 +565,18 @@ public class NzbFileStream(
                 rangeStart);
         }
 
+        // A read that must walk the providers fresh is a probe: the segment its range starts
+        // in fails instead of being gap-filled, so the provider verdict reaches the client at
+        // any offset. Playback reads keep filling it. A failed fast-seek head below falls
+        // through to the probed path, which applies the same rule.
+        var failFastOnFirstSegment = ProviderReadEvidence.RequiresFreshWalk;
+
         if (CanUseExactIndexedDirectHead())
         {
             StreamStartupTrace.TryRecord(StreamStartupPhase.ExactIndexDirect);
             var exact = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
             return await GetExactIndexedStreamAsync(
-                    exact, rangeStart, readBudget, cancellationToken)
+                    exact, rangeStart, readBudget, failFastOnFirstSegment, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -587,7 +593,8 @@ public class NzbFileStream(
 
         StreamStartupTrace.TryRecord(StreamStartupPhase.LegacyProbedUnbuffered);
         var probed = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
-        return await GetLegacyProbedStreamAsync(probed, rangeStart, readBudget, cancellationToken)
+        return await GetLegacyProbedStreamAsync(
+                probed, rangeStart, readBudget, failFastOnFirstSegment, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -600,6 +607,7 @@ public class NzbFileStream(
         InterpolationSearch.Result foundSegment,
         long rangeStart,
         long? readBudget,
+        bool failFastOnFirstSegment,
         CancellationToken cancellationToken)
     {
         var prefixBytes = checked(rangeStart - foundSegment.FoundByteRange.StartInclusive);
@@ -612,7 +620,7 @@ public class NzbFileStream(
 
         return GetPositionedMultiSegmentStreamAsync(
             foundSegment.FoundIndex,
-            failFastOnFirstSegment: false,
+            failFastOnFirstSegment,
             readBudget,
             prefixBytes,
             rangeStart,
@@ -625,6 +633,7 @@ public class NzbFileStream(
         InterpolationSearch.Result foundSegment,
         long rangeStart,
         long? readBudget,
+        bool failFastOnFirstSegment,
         CancellationToken cancellationToken)
     {
         var prefixBytes = rangeStart - foundSegment.FoundByteRange.StartInclusive;
@@ -636,7 +645,7 @@ public class NzbFileStream(
         }
         return GetPositionedMultiSegmentStreamAsync(
             foundSegment.FoundIndex,
-            failFastOnFirstSegment: false,
+            failFastOnFirstSegment,
             readBudget,
             prefixBytes,
             rangeStart,
