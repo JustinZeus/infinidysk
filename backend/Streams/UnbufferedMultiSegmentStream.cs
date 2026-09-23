@@ -385,7 +385,7 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         }
         if (!_segmentSizes.TryGetFillLength(segmentIndex, out var fill, out _))
             throw CreateUnknownLengthFailure(segmentIndex, missing);
-        ApplyZeroFill(segmentIndex, segmentId, fill, missing, isCorruption: false);
+        ApplyZeroFill(segmentIndex, segmentId, fill, missing, isCorruption: false, healthConfirmed: true);
     }
 
     private async Task<Stream?> TryGetLocalSegmentAsync(
@@ -873,22 +873,26 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         string segmentId,
         long fill,
         Exception cause,
-        bool isCorruption)
+        bool isCorruption,
+        bool healthConfirmed = false)
     {
-        ProviderReadEvidence.ThrowIfIncomplete(cause);
+        var reportHole = healthConfirmed || !ProviderReadEvidence.IsUnprovenMiss(cause);
         _consecutiveZeroFills++;
         _openSegmentHole = true;
-        PlaybackHoleTracker.RecordHole(_fileName, segmentId, cause);
+        if (reportHole) PlaybackHoleTracker.RecordHole(_fileName, segmentId, cause);
         var template = isCorruption
             ? "Article {SegmentId} persistently corrupt while reading {FileName}. Filling the {Bytes}-byte gap to preserve later file offsets."
             : "Article {SegmentId} missing on all providers while reading {FileName}. Filling the {Bytes}-byte gap to preserve later file offsets.";
         ZeroFillLogLimiter.Write(template, segmentId, _fileName, fill, cause);
         if (MultiProviderNntpClient.CurrentReadSessionId is { } sessionId)
             StreamTrace.TryZeroFill(sessionId, segmentId, fill);
-        if (isCorruption)
-            Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
-        else
-            Par2RepairTriggerSink.Current?.ReportZeroFill(_fileName, segmentId, segmentIndex, fill);
+        if (reportHole)
+        {
+            if (isCorruption)
+                Par2RepairTriggerSink.ReportCorruption(_fileName, segmentId);
+            else
+                Par2RepairTriggerSink.Current?.ReportZeroFill(_fileName, segmentId, segmentIndex, fill);
+        }
         var cap = _consecutiveZeroFills >= GapFillLimits.MaxConsecutiveZeroFills;
         var trackerFail = PlaybackHoleTracker.ShouldFailFast(_fileName, out var failFast);
         if (cap || trackerFail)

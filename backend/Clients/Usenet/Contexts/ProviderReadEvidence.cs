@@ -1,4 +1,4 @@
-using System.Runtime.ExceptionServices;
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
 using NzbWebDAV.Exceptions;
@@ -15,16 +15,13 @@ internal readonly record struct ProviderSelectionCoverage(
     public bool IsComplete => !OmittedForByteLimit && !OmittedForOpenCircuit && !OmittedForOtherReason;
 }
 
-/// <summary>Conservative miss evidence owned by one request or shared upstream stream.</summary>
+/// <summary>Article-local terminal evidence owned by one request or shared upstream stream.</summary>
 internal sealed class ProviderReadEvidence
 {
     private const string ItemKey = "ProviderReadEvidence";
-    private const string ExceptionDataKey = "ProviderReadEvidence.IncompleteReason";
+    private const string UnobservedMiss = "a provider walk ended without a definitive miss from every enabled provider";
     private static readonly AsyncLocal<ProviderReadEvidence?> CurrentLocal = new();
-    private int _incomplete;
-    private int _recorded;
-    private int _byteLimitOmitted;
-    private int _openCircuitOmitted;
+    private ConcurrentDictionary<string, string?>? _terminalWalks;
     private bool _requiresFreshWalk;
 
     internal static ProviderReadEvidence? Current => CurrentLocal.Value;
@@ -51,57 +48,45 @@ internal sealed class ProviderReadEvidence
         return new Scope(previous);
     }
 
-    public bool HasTerminalWalk => Volatile.Read(ref _recorded) != 0;
-    public bool IsComplete => HasTerminalWalk && Volatile.Read(ref _incomplete) == 0;
-
-    public string IncompleteReason =>
-        (Volatile.Read(ref _byteLimitOmitted) > 0, Volatile.Read(ref _openCircuitOmitted) > 0) switch
-        {
-            (true, true) => "providers were skipped for an exhausted byte limit and an open circuit breaker",
-            (true, false) => "a provider was skipped because it reached its byte limit",
-            (false, true) => "a provider was skipped because its circuit breaker was open",
-            _ => "a provider walk ended without a definitive miss from every enabled provider",
-        };
-
-    internal void RecordTerminalWalk(bool pureDefinitiveMiss, ProviderSelectionCoverage coverage)
+    internal void RecordTerminalWalk(string? segmentId, bool pureDefinitiveMiss, ProviderSelectionCoverage coverage)
     {
-        if (coverage.OmittedForByteLimit) Volatile.Write(ref _byteLimitOmitted, 1);
-        if (coverage.OmittedForOpenCircuit) Volatile.Write(ref _openCircuitOmitted, 1);
-        if (!pureDefinitiveMiss || !coverage.IsComplete) Volatile.Write(ref _incomplete, 1);
-        Volatile.Write(ref _recorded, 1);
+        if (segmentId is null) return;
+        var reason = pureDefinitiveMiss && coverage.IsComplete
+            ? null
+            : (coverage.OmittedForByteLimit, coverage.OmittedForOpenCircuit) switch
+            {
+                (true, true) => "providers were skipped for an exhausted byte limit and an open circuit breaker",
+                (true, false) => "a provider was skipped because it reached its byte limit",
+                (false, true) => "a provider was skipped because its circuit breaker was open",
+                _ => UnobservedMiss,
+            };
+        RecordVerdict(segmentId, reason);
     }
 
-    /// <summary>Carry detached producer evidence on the failure delivered to every reader.</summary>
-    internal void TagFailure(Exception exception)
+    private void RecordVerdict(string segmentId, string? reason) =>
+        LazyInitializer.EnsureInitialized(ref _terminalWalks,
+            static () => new ConcurrentDictionary<string, string?>(StringComparer.Ordinal))[segmentId] = reason;
+
+    private string? ReasonFor(string segmentId) =>
+        Volatile.Read(ref _terminalWalks) is { } walks && walks.TryGetValue(segmentId, out var reason)
+            ? reason
+            : UnobservedMiss;
+
+    /// <summary>Only the shared delivery boundary may import another producer's proof.</summary>
+    internal void AdoptFailure(ProviderReadEvidence producer, Exception exception)
     {
-        if (!IsComplete)
-            exception.Data[ExceptionDataKey] = IncompleteReason;
-        else if (exception.Data[ExceptionDataKey] is null)
-            exception.Data[ExceptionDataKey] = true;
+        if (exception.TryGetCausingException(out UsenetArticleNotFoundException? missing))
+            RecordVerdict(missing!.SegmentId, producer.ReasonFor(missing.SegmentId));
     }
 
-    internal static string? IncompleteReasonFrom(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-            if (current.Data[ExceptionDataKey] is string reason) return reason;
-        return null;
-    }
+    internal string? IncompleteReasonFrom(Exception exception) =>
+        exception.TryGetCausingException(out UsenetArticleNotFoundException? missing)
+            ? ReasonFor(missing!.SegmentId)
+            : null;
 
-    internal static bool HasCompleteFailureEvidence(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-            if (current.Data[ExceptionDataKey] is true) return true;
-        return false;
-    }
-
-    /// <summary>Do not turn an incomplete miss into a gap-fill repair or playback-hole cache entry.</summary>
-    internal static void ThrowIfIncomplete(Exception exception)
-    {
-        if (!exception.TryGetCausingException<UsenetArticleNotFoundException>(out _)) return;
-        Current?.TagFailure(exception);
-        if (IncompleteReasonFrom(exception) is not null)
-            ExceptionDispatchInfo.Capture(exception).Throw();
-    }
+    /// <summary>Gap-fill remains playable; only unproven-miss repair/cache reports are suppressed.</summary>
+    internal static bool IsUnprovenMiss(Exception exception) =>
+        Current?.IncompleteReasonFrom(exception) is not null;
 
     public static ProviderReadEvidence? FromRequestItems(IDictionary<object, object?> requestItems) =>
         requestItems.TryGetValue(ItemKey, out var value) ? value as ProviderReadEvidence : null;

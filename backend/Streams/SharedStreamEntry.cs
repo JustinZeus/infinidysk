@@ -347,7 +347,6 @@ internal sealed class SharedStreamEntry : IAsyncDisposable
                     EntryId, Path, Anchor);
             }
 
-            ReadEvidence.TagFailure(ex);
             _ring.SetFailure(ex);
             lock (_lock)
             {

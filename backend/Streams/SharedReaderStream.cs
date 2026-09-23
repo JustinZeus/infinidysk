@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Services.StreamTrace;
 using UsenetSharp.Streams;
 
@@ -102,6 +103,8 @@ internal sealed class SharedReaderStream : FastReadOnlyStream
                     return await ReadFallbackAsync(buffer, cancellationToken).ConfigureAwait(false);
 
                 case RingReadKind.Failed:
+                    if (result.Exception is { } failure)
+                        ProviderReadEvidence.Current?.AdoptFailure(_entry.ReadEvidence, failure);
                     _deliveredFailure = result.Exception;
                     DetachQuiet();
                     throw result.DispatchFailure();
@@ -180,8 +183,9 @@ internal sealed class SharedReaderStream : FastReadOnlyStream
         await base.DisposeAsync().ConfigureAwait(false);
     }
 
-    private static Exception DuplicateFailure(Exception delivered)
+    private Exception DuplicateFailure(Exception delivered)
     {
+        ProviderReadEvidence.Current?.AdoptFailure(_entry.ReadEvidence, delivered);
         ExceptionDispatchInfo.Capture(delivered).Throw();
         return delivered;
     }

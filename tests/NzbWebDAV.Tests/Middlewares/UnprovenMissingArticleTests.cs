@@ -10,6 +10,7 @@ using NzbWebDAV.Services;
 using NzbWebDAV.Services.Metrics;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Tests.Clients.Usenet;
+using NzbWebDAV.Tests.Database;
 using NzbWebDAV.Tests.TestUtils;
 using NzbWebDAV.WebDav.Base;
 using Serilog;
@@ -25,7 +26,7 @@ namespace NzbWebDAV.Tests.Middlewares;
 /// error boundary, so every assertion is a status code, a provider contact, or a repair
 /// side effect rather than internal bookkeeping.
 /// </summary>
-[Collection(nameof(GlobalLoggerCollection))]
+[Collection(nameof(ConfigPathCollection))]
 public sealed partial class UnprovenMissingArticleTests
 {
     private const string UnprovenTemplate = "could not be confirmed missing";
