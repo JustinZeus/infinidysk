@@ -1169,7 +1169,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 catch (UsenetArticleNotFoundException e)
                 {
                     var fallback = await TryFallbackSegmentsAsync(
-                            segmentIndex, lease, cancellationToken)
+                            segmentIndex, lease, e, cancellationToken)
                         .ConfigureAwait(false);
                     if (fallback is not null)
                     {
@@ -1198,7 +1198,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                     if (attempt >= GetCorruptionRetryLimit(segmentId))
                     {
                         var fallback = await TryFallbackSegmentsAsync(
-                                segmentIndex, lease, cancellationToken)
+                                segmentIndex, lease, e, cancellationToken)
                             .ConfigureAwait(false);
                         if (fallback is not null)
                         {
@@ -1430,7 +1430,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         }
         catch (UsenetArticleNotFoundException e)
         {
-            var fallback = await TryFallbackSegmentsAsync(segmentIndex, lease, cancellationToken)
+            var fallback = await TryFallbackSegmentsAsync(segmentIndex, lease, e, cancellationToken)
                 .ConfigureAwait(false);
             if (fallback is not null)
             {
@@ -1674,7 +1674,7 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                 }
             }
 
-            var fallback = await TryFallbackSegmentsAsync(segmentIndex, lease, cancellationToken)
+            var fallback = await TryFallbackSegmentsAsync(segmentIndex, lease, failure, cancellationToken)
                 .ConfigureAwait(false);
             if (fallback is not null)
             {
@@ -1696,11 +1696,13 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     /// attempt completes its callback exactly once via DecodedBodyAsync.
     /// When <paramref name="existingLease"/> is supplied it is retained across
     /// attempts; on success ownership transfers to the returned stream, on miss
-    /// the caller still owns the lease.
+    /// the caller still owns the lease. An alternate that fails without proof
+    /// leaves <paramref name="primaryFailure"/> unproven as well.
     /// </summary>
     private async Task<DrainedSegment?> TryFallbackSegmentsAsync(
         int segmentIndex,
         ArticleByteLease? existingLease,
+        Exception primaryFailure,
         CancellationToken cancellationToken)
     {
         var fallbacks = GetFallbacks(segmentIndex);
@@ -1747,13 +1749,15 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
                     lease = null;
                     return drained;
                 }
-                catch (UsenetArticleNotFoundException)
+                catch (UsenetArticleNotFoundException alternateMissing)
                 {
                     // Try the next alternate MessageId.
+                    ProviderReadEvidence.Current?.InheritAlternateVerdict(primaryFailure, alternateMissing);
                 }
-                catch (UsenetCorruptArticleException)
+                catch (UsenetCorruptArticleException alternateCorrupt)
                 {
                     // Corrupt fallback — try the next alternate MessageId.
+                    ProviderReadEvidence.Current?.InheritAlternateVerdict(primaryFailure, alternateCorrupt);
                 }
                 catch (SeekPositionNotFoundException)
                 {

@@ -132,6 +132,40 @@ internal sealed class ProviderReadEvidence
         Current is { } evidence
         && (evidence.IncompleteReasonFrom(exception) ?? evidence.IncompleteCorruptionReasonFrom(exception)) is not null;
 
+    /// <summary>
+    /// Alternate article ids that could serve the same segment: the primary failure is only
+    /// proven when every alternate that failed was proven too.
+    /// </summary>
+    internal void InheritAlternateVerdict(Exception primaryFailure, Exception alternateFailure)
+    {
+        string alternateId;
+        string? alternateReason;
+        if (alternateFailure.TryGetCausingException(out UsenetArticleNotFoundException? alternateMiss))
+            (alternateId, alternateReason) = (alternateMiss!.SegmentId, ReasonFor(alternateMiss.SegmentId));
+        else if (alternateFailure.TryGetCausingException(out UsenetCorruptArticleException? alternateCorrupt))
+            (alternateId, alternateReason) = (
+                alternateCorrupt!.SegmentId,
+                CorruptReasonFor((alternateCorrupt.SegmentId, alternateCorrupt.ProviderKey)));
+        else
+            return;
+        if (alternateReason is null) return;
+
+        var reason = $"its alternate article {alternateId} is unproven ({alternateReason})";
+        if (primaryFailure.TryGetCausingException(out UsenetArticleNotFoundException? missing))
+        {
+            if (ReasonFor(missing!.SegmentId) is null) RecordVerdict(missing.SegmentId, reason);
+        }
+        else if (primaryFailure.TryGetCausingException(out UsenetCorruptArticleException? corrupt))
+        {
+            var serve = (corrupt!.SegmentId, corrupt.ProviderKey);
+            if (CorruptReasonFor(serve) is null) RecordCorruptVerdict(serve, reason);
+        }
+    }
+
+    /// <summary>Of two failures for candidates of the same data, keep one that is not proven.</summary>
+    internal static T PreferUnproven<T>(T? kept, T next) where T : Exception =>
+        kept is not null && IsUnproven(kept) ? kept : next;
+
     public static ProviderReadEvidence? FromRequestItems(IDictionary<object, object?> requestItems) =>
         requestItems.TryGetValue(ItemKey, out var value) ? value as ProviderReadEvidence : null;
 
