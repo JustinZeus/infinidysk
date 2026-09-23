@@ -118,7 +118,6 @@ public class MetricsRollupService(
     private async Task ApplyByteCountersAsync(MetricsDbContext db, long currentMinute)
     {
         var drained = bytesTracker.DrainClosed(currentMinute);
-        if (drained.Count == 0) return;
 
         foreach (var (minute, providerKey, bytes) in drained)
         {
@@ -153,6 +152,66 @@ public class MetricsRollupService(
                 """,
                 minute, bytes).ConfigureAwait(false);
         }
+
+        await ApplyPendingPeakRatesAsync(db, bytesTracker, currentMinute).ConfigureAwait(false);
+    }
+
+    internal static async Task ApplyPendingPeakRatesAsync(
+        MetricsDbContext db,
+        ProviderBytesTracker bytesTracker,
+        long currentMinute)
+    {
+        await bytesTracker.PeakPersistenceGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var peaks = bytesTracker.DrainClosedPeaks(currentMinute);
+            try
+            {
+                await ApplyPeakRatesAsync(db, peaks).ConfigureAwait(false);
+            }
+            catch
+            {
+                bytesTracker.RestorePeaks(peaks);
+                throw;
+            }
+        }
+        finally
+        {
+            bytesTracker.PeakPersistenceGate.Release();
+        }
+    }
+
+    // MAX-merge so catch-up re-runs and restarts can never lower a persisted peak.
+    internal static async Task ApplyPeakRatesAsync(
+        MetricsDbContext db,
+        IReadOnlyList<(long Minute, long PeakBytesPerSec)> peaks)
+    {
+        if (peaks.Count == 0) return;
+
+        await using var transaction = await db.Database.BeginTransactionAsync().ConfigureAwait(false);
+        foreach (var (minute, peak) in peaks)
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO ThroughputMinutes
+                    (Minute, BytesServed, BytesFetched, Articles, ClientArticles, Misses, Errors, ActiveReadsMax, PeakFetchBytesPerSec)
+                VALUES ({0}, 0, 0, 0, 0, 0, 0, 0, {1})
+                ON CONFLICT(Minute) DO UPDATE SET
+                    PeakFetchBytesPerSec = MAX(ThroughputMinutes.PeakFetchBytesPerSec, excluded.PeakFetchBytesPerSec);
+                """,
+                minute, peak).ConfigureAwait(false);
+
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO ThroughputHourly (Hour, PeakFetchBytesPerSec)
+                VALUES ({0}, {1})
+                ON CONFLICT(Hour) DO UPDATE SET
+                    PeakFetchBytesPerSec = MAX(ThroughputHourly.PeakFetchBytesPerSec, excluded.PeakFetchBytesPerSec);
+                """,
+                FloorTo(minute, OneHour), peak).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync().ConfigureAwait(false);
     }
 
     internal static async Task RollupMinuteAsync(MetricsDbContext db, long minute)
@@ -162,7 +221,7 @@ public class MetricsRollupService(
         var queueWorkload = (int)SegmentFetch.FetchWorkload.Queue;
 
         // ThroughputMinute: read-session bytes (downstream) + fetch bytes (upstream).
-        // BytesFetched intentionally omitted from ON CONFLICT — owned by ProviderBytesTracker.
+        // BytesFetched and PeakFetchBytesPerSec intentionally omitted from ON CONFLICT — owned by ProviderBytesTracker.
         // Re-rolling a minute (e.g. on catch-up after restart) must not zero out bytes the
         // tracker already deposited via ApplyByteCountersAsync.
         await db.Database.ExecuteSqlRawAsync(
