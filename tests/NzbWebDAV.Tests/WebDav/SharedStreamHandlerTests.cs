@@ -183,6 +183,29 @@ public class SharedStreamHandlerTests
     }
 
     [Fact]
+    public async Task FreshWalk_DoesNotAttachToAnExistingSharedStream()
+    {
+        var payload = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var item = new DetachedStoreItem(payload);
+        var (handler, registry, _) = Handler(item);
+        var pinned = await registry.TryAttachAsync(
+            "/movie.mkv", 0, null, payload.Length, item, NoFallback, CancellationToken.None);
+        Assert.NotNull(pinned);
+        await using var pin = pinned!.Stream;
+
+        var context = Request(HttpMethods.Get, "/movie.mkv");
+        context.Request.Headers.CacheControl = "no-cache";
+        using var body = new MemoryStream();
+        context.Response.Body = body;
+
+        await handler.HandleRequestAsync(context);
+
+        Assert.Equal(payload, body.ToArray());
+        Assert.Equal(1, item.DetachedOpenCount);
+        Assert.Equal(1, item.PrivateOpenCount);
+    }
+
+    [Fact]
     public async Task IneligibleItem_UsesPrivatePath()
     {
         var item = new PrivateOnlyItem();

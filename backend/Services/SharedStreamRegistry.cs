@@ -70,7 +70,8 @@ public sealed class SharedStreamRegistry : IAsyncDisposable, IDisposable
             return null;
         }
 
-        if (Volatile.Read(ref _disposed) != 0 || !_config.IsSharedStreamsEnabled())
+        if (Volatile.Read(ref _disposed) != 0 || !_config.IsSharedStreamsEnabled()
+            || NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk)
         {
             _tracker.RecordSharedAttachMiss(SharedStreamAttachMissReason.Ineligible);
             return null;

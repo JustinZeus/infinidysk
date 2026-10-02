@@ -760,7 +760,8 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         _expectedFirstSegmentRangeWasClippedAtFileEnd =
             expectedFirstSegmentRangeWasClippedAtFileEnd;
         _knownCorruptSegmentIds = knownCorruptSegmentIds;
-        _knownMissingSegmentIndices = knownMissingSegmentIndices;
+        _knownMissingSegmentIndices =
+            NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk ? null : knownMissingSegmentIndices;
         _fileName = string.IsNullOrEmpty(fileName) ? "unknown" : fileName;
         _readBudget = readBudget ?? NzbWebDAV.WebDav.Requests.RangeContext.GetReadBudget();
         _budget = inFlightArticleBudget ?? InFlightArticleBudget.Current;

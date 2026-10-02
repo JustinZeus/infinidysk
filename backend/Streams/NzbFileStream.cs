@@ -553,6 +553,7 @@ public class NzbFileStream(
         ThrowIfPlaybackFailFast();
         var readBudget = readBudgetOverride ?? NzbWebDAV.WebDav.Requests.RangeContext.GetReadBudget();
 
+        var failFastOnFirstSegment = NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk;
         if (rangeStart == 0)
         {
             return GetMultiSegmentStream(
@@ -568,11 +569,11 @@ public class NzbFileStream(
             StreamStartupTrace.TryRecord(StreamStartupPhase.ExactIndexDirect);
             var exact = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
             return await GetExactIndexedStreamAsync(
-                    exact, rangeStart, readBudget, cancellationToken)
+                    exact, rangeStart, readBudget, failFastOnFirstSegment, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        if (!ShouldUseLegacyUnbufferedRangePath(readBudget))
+        if (!failFastOnFirstSegment && !ShouldUseLegacyUnbufferedRangePath(readBudget))
         {
             var buffered = await TryGetSeekStreamFast(rangeStart, cancellationToken, readBudget)
                 .ConfigureAwait(false);
@@ -585,7 +586,8 @@ public class NzbFileStream(
 
         StreamStartupTrace.TryRecord(StreamStartupPhase.LegacyProbedUnbuffered);
         var probed = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
-        return await GetLegacyProbedStreamAsync(probed, rangeStart, readBudget, cancellationToken)
+        return await GetLegacyProbedStreamAsync(
+                probed, rangeStart, readBudget, failFastOnFirstSegment, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -598,6 +600,7 @@ public class NzbFileStream(
         InterpolationSearch.Result foundSegment,
         long rangeStart,
         long? readBudget,
+        bool failFastOnFirstSegment,
         CancellationToken cancellationToken)
     {
         var prefixBytes = checked(rangeStart - foundSegment.FoundByteRange.StartInclusive);
@@ -610,7 +613,7 @@ public class NzbFileStream(
 
         return GetPositionedMultiSegmentStreamAsync(
             foundSegment.FoundIndex,
-            failFastOnFirstSegment: false,
+            failFastOnFirstSegment,
             readBudget,
             prefixBytes,
             rangeStart,
@@ -623,6 +626,7 @@ public class NzbFileStream(
         InterpolationSearch.Result foundSegment,
         long rangeStart,
         long? readBudget,
+        bool failFastOnFirstSegment,
         CancellationToken cancellationToken)
     {
         var prefixBytes = rangeStart - foundSegment.FoundByteRange.StartInclusive;
@@ -634,7 +638,7 @@ public class NzbFileStream(
         }
         return GetPositionedMultiSegmentStreamAsync(
             foundSegment.FoundIndex,
-            failFastOnFirstSegment: false,
+            failFastOnFirstSegment,
             readBudget,
             prefixBytes,
             rangeStart,
@@ -682,7 +686,7 @@ public class NzbFileStream(
                         sliced.FirstSegmentFileOffset,
                         streamingBodyBatchWidth,
                         knownCorruptSegmentIds,
-                        sliced.KnownMissing,
+                        NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk ? null : sliced.KnownMissing,
                         cancellationToken)
                     {
                         InitialBatchPlan = initialBatchPlan,

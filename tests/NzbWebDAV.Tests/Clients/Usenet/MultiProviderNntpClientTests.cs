@@ -1,4 +1,5 @@
 using System.IO;
+using Microsoft.AspNetCore.Http;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Concurrency;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -1707,6 +1708,52 @@ public class MultiProviderNntpClientTests
         Assert.Equal(1, first.SingularRequests);
         Assert.Equal(0, sibling.SingularRequests);
         Assert.Equal(2, otherGroup.SingularRequests);
+    }
+
+    [Fact]
+    public async Task FreshWalk_ReprobesNegativeCacheAndStorageGroupSibling()
+    {
+        var cache = new ArticleMissNegativeCache(new ConfigManager());
+        var first = new ScriptedNntpClient
+        {
+            BatchResponseCode = 430,
+            SingularResponseCode = 430,
+        };
+        var sibling = new ScriptedNntpClient
+        {
+            BatchResponseCode = 222,
+            SingularResponseCode = 222,
+        };
+        var otherGroup = new ScriptedNntpClient
+        {
+            BatchResponseCode = 222,
+            SingularResponseCode = 222,
+        };
+        using var client = new MultiProviderNntpClient(
+        [
+            CreateProvider(first, host: "a.example", storageGroup: "omicron"),
+            CreateProvider(sibling, host: "b.example", storageGroup: "omicron"),
+            CreateProvider(otherGroup, host: "c.example", storageGroup: "eweka"),
+        ], articleMissCache: cache);
+
+        var playback = await client.DecodedBodyAsync("segment", CancellationToken.None);
+        Assert.Equal(UsenetResponseType.ArticleRetrievedBodyFollows, playback.ResponseType);
+        await playback.Stream!.DisposeAsync();
+        Assert.Equal(1, first.SingularRequests);
+        Assert.Equal(0, sibling.SingularRequests);
+        Assert.Equal(1, otherGroup.SingularRequests);
+        Assert.True(cache.Entries > 0);
+
+        var request = new DefaultHttpContext();
+        request.Request.Headers.CacheControl = "no-cache";
+        using var freshWalk = FreshWalkRequest.BeginRequest(request);
+        var fresh = await client.DecodedBodyAsync("segment", CancellationToken.None);
+
+        Assert.Equal(UsenetResponseType.ArticleRetrievedBodyFollows, fresh.ResponseType);
+        await fresh.Stream!.DisposeAsync();
+        Assert.Equal(2, first.SingularRequests);
+        Assert.Equal(1, sibling.SingularRequests);
+        Assert.Equal(1, otherGroup.SingularRequests);
     }
 
     [Fact]

@@ -212,6 +212,7 @@ public class GetWebdavItemController(
     [HttpGet]
     public async Task HandleRequest()
     {
+        using var freshWalk = FreshWalkRequest.BeginRequest(HttpContext);
         try
         {
             HttpContext.Items["configManager"] = configManager;

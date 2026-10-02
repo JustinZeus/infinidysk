@@ -73,7 +73,8 @@ public class UnbufferedMultiSegmentStream : FastReadOnlyNonSeekableStream
         _firstSegmentFileOffset = firstSegmentFileOffset;
         _failFastOnFirstSegment = failFastOnFirstSegment;
         _knownCorruptSegmentIds = knownCorruptSegmentIds;
-        _knownMissingSegmentIndices = knownMissingSegmentIndices;
+        _knownMissingSegmentIndices =
+            NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk ? null : knownMissingSegmentIndices;
         _expectedFirstSegmentRange = expectedFirstSegmentRange;
         _expectedFirstSegmentRangeWasClippedAtFileEnd = expectedFirstSegmentRangeWasClippedAtFileEnd;
     }

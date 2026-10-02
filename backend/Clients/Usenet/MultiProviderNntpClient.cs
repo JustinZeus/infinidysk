@@ -766,7 +766,7 @@ public class MultiProviderNntpClient(
                 || (definitiveMiss && !reprobePrimary))
             {
                 var primaryGroup = NormalizeStorageGroup(primaryProvider.StorageGroup);
-                if (primaryGroup.Length > 0 && definitiveMiss) missingGroups.Add(primaryGroup);
+                if (definitiveMiss) MarkMissingGroup(missingGroups, primaryGroup);
                 retryProviders = fallbackProviders;
             }
             else
@@ -897,7 +897,7 @@ public class MultiProviderNntpClient(
                                 if (ReferenceEquals(provider, primaryProvider))
                                     ConfirmPrimaryBatchFailureResolved();
                                 walk.CurrentDefinitiveMisses++;
-                                if (group.Length > 0) missingGroups.Add(group);
+                                MarkMissingGroup(missingGroups, group);
                                 MarkCachedMissing(segmentId, provider, NntpOperation.PipelinedBody);
                             }
                             else
@@ -1243,7 +1243,7 @@ public class MultiProviderNntpClient(
                     (priorMisses ??= []).Add((provider.MetricsKey, SegmentFetch.FetchStatus.Missing));
                     lastNoArticleResult = result;
                     lastOutcomeWasException = false;
-                    if (group.Length > 0) missingGroups.Add(group);
+                    MarkMissingGroup(missingGroups, group);
                     MarkCachedMissing(segmentId, provider, operation);
                     attemptIndex++;
                     continue;
@@ -1433,7 +1433,7 @@ public class MultiProviderNntpClient(
                     lastNoArticleResult = result;
                     lastException = null;
                     lastOutcomeWasException = false;
-                    if (group.Length > 0) missingGroups.Add(group);
+                    MarkMissingGroup(missingGroups, group);
                     if (articleId is { } missId) MarkCachedMissing(missId, provider, operation);
                     attemptIndex++;
                     continue;
@@ -1604,7 +1604,7 @@ public class MultiProviderNntpClient(
     private bool IsCachedMissing(SegmentId segmentId, MultiConnectionNntpClient provider,
         NntpOperation operation)
     {
-        if (articleMissCache == null) return false;
+        if (articleMissCache == null || FreshWalkRequest.RequiresFreshWalk) return false;
         return providerGeneration is { } generation
             && TryGetMissOperation(operation) is { } missOperation
             && articleMissCache.IsMissing(CacheKey(segmentId, provider, missOperation), generation);
@@ -1613,8 +1613,15 @@ public class MultiProviderNntpClient(
     private void MarkCachedMissing(SegmentId segmentId, MultiConnectionNntpClient provider,
         NntpOperation operation)
     {
+        if (FreshWalkRequest.RequiresFreshWalk) return;
         if (TryGetMissOperation(operation) is { } missOperation)
             articleMissCache?.MarkMissing(CacheKey(segmentId, provider, missOperation), providerGeneration);
+    }
+
+    private static void MarkMissingGroup(HashSet<string> missingGroups, string group)
+    {
+        if (group.Length > 0 && !FreshWalkRequest.RequiresFreshWalk)
+            missingGroups.Add(group);
     }
 
     /// <summary>
@@ -1637,7 +1644,7 @@ public class MultiProviderNntpClient(
         if (exception.TryGetCausingException<UsenetMismatchedArticleException>(out _))
             return;
         var group = NormalizeStorageGroup(provider.StorageGroup);
-        if (group.Length > 0) missingGroups.Add(group);
+        MarkMissingGroup(missingGroups, group);
         MarkCachedMissing(id, provider, operation);
     }
 

@@ -75,6 +75,7 @@ public class GetAndHeadHandlerPatch : IRequestHandler
     /// </returns>
     public async Task<bool> HandleRequestAsync(HttpContext httpContext)
     {
+        using var freshWalk = FreshWalkRequest.BeginRequest(httpContext);
         // Obtain request and response
         var request = httpContext.Request;
         var response = httpContext.Response;

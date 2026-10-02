@@ -64,6 +64,7 @@ internal static class PlaybackHoleTracker
     public static bool ShouldFailFast(string? path, out Exception? exception)
     {
         exception = null;
+        if (NzbWebDAV.Clients.Usenet.FreshWalkRequest.RequiresFreshWalk) return false;
         if (!IsTrackablePath(path) || !Files.TryGetValue(path!, out var state))
             return false;
 
