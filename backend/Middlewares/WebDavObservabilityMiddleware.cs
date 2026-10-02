@@ -114,7 +114,12 @@ public class WebDavObservabilityMiddleware(RequestDelegate next, StreamTraceBuff
                     Increment("abortedBeforeFirstByte");
             }
 
-            if (failed && !context.Items.ContainsKey(ExceptionMiddleware.CircuitAdmissionRejectedKey))
+            var logInconclusiveIdsMiss = status == StatusCodes.Status503ServiceUnavailable
+                && HttpMethods.IsGet(method)
+                && context.Request.Path.StartsWithSegments("/.ids", StringComparison.OrdinalIgnoreCase);
+            if (failed
+                && (!context.Items.ContainsKey(ExceptionMiddleware.CircuitAdmissionRejectedKey)
+                    || logInconclusiveIdsMiss))
             {
                 Log.Warning(
                     "WebDAV request failed. Method={Method} Path={Path} Status={Status} DurationMs={DurationMs}",
